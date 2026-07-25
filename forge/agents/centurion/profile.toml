@@ -37,6 +37,6 @@ timeout_s     = 300
 # a slimmer purpose-built image works too. Under the subprocess backend (a
 # Docker-less host) this is ignored and commands use whatever is installed
 # locally — so on such hosts, install the tooling on the host instead.
-image         = "kalilinux/kali-rolling"
+image         = "forge-cell-centurion:latest"
 run_as_root   = true
 cap_add       = ["NET_RAW", "NET_ADMIN", "NET_BIND_SERVICE", "CHOWN", "DAC_OVERRIDE", "SETUID", "SETGID", "FOWNER"]
