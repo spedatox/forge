@@ -29,7 +29,12 @@ class JobConstraints(BaseModel):
 
 class JobRequest(BaseModel):
     agent: str                          # which agent to run (must exist in the registry)
-    task: str                           # the task text
+    task: str                           # the task text (last user message; single-shot dispatch)
+    # Full prior transcript (Anthropic messages format) for a CHAT turn — Mark VI
+    # sends it every turn (its DB is the source of truth). Empty for a fire-and-
+    # forget dispatch. When present the Warden is seeded with the whole conversation
+    # instead of just `task`, so the peer is not amnesiac between messages.
+    history: list[dict[str, Any]] = Field(default_factory=list)
     constraints: JobConstraints = Field(default_factory=JobConstraints)
     repo_path: str | None = None        # project under work; Cell workspace + graph root
     job_id: str = Field(default_factory=lambda: uuid.uuid4().hex)
@@ -62,13 +67,17 @@ def job_from_task_dispatch(frame: dict[str, Any], agent_id: str) -> JobRequest:
 
 
 def job_from_chat_request(frame: dict[str, Any], agent_id: str) -> JobRequest:
-    """Mark VI `chat_request` → JobRequest. The peer is stateless per turn; the
-    task is the last user message in the supplied Anthropic-format history."""
+    """Mark VI `chat_request` → JobRequest. The peer is stateless per turn: Mark VI
+    sends the FULL Anthropic-format history every time (its DB is the source of
+    truth). We carry that whole transcript so the Warden sees the conversation, not
+    just the latest message — `task` is kept as the last user line for logging and
+    as a fallback when no history is supplied."""
     history = frame.get("history", []) or []
     task = _last_user_text(history)
     return JobRequest(
         agent=agent_id,
         task=task,
+        history=history,
         repo_path=frame.get("cwd"),
         job_id=str(frame.get("chat_id", uuid.uuid4().hex)),
         # Heartbreaker's model picker / per-agent pin — None lets the profile

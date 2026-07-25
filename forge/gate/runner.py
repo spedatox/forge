@@ -155,7 +155,13 @@ async def run_job(
             emit=lambda ev: fan(JobEvent(job_id=request.job_id, type=ev["type"],
                                          data=ev.get("data"))),
         )
-        terminal = await warden.run(request.task)
+        # A chat turn carries the full prior transcript — seed the loop with it so
+        # the agent remembers the conversation. A bare dispatch has no history and
+        # runs single-shot on `task`.
+        if request.history:
+            terminal = await warden.run_messages(request.history)
+        else:
+            terminal = await warden.run(request.task)
         return terminal
     except Exception as e:  # noqa: BLE001 — fail loud (§9.5) as a terminal error event
         logger.exception("run_job_failed")
