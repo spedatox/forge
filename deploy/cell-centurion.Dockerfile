@@ -47,11 +47,12 @@ RUN if [ -f /usr/share/wordlists/rockyou.txt.gz ]; then \
     fi
 
 # 3) Warm the caches the first real job would otherwise pay for: nuclei's
-#    template repo and the SearchSploit / Metasploit module caches. These are
-#    soft — a warm step must never fail the bake, so each is guarded.
+#    template repo and the SearchSploit database. Both are soft — a warm step must
+#    never fail the bake, so each is guarded. (Metasploit is intentionally NOT
+#    warmed here: msfconsole wants a writable HOME/DB that a build layer lacks, so
+#    it errors noisily for no gain. Its module cache builds on first real use.)
 RUN nuclei -update-templates -silent || true
 RUN searchsploit -u || true
-RUN msfconsole -qx 'version; exit' || true
 
 # Cells are launched with `--workdir /workspace` and an explicit `sleep infinity`
 # by the Docker Cell, so this CMD is only a sensible default for manual runs.
