@@ -18,8 +18,11 @@ tools = ["security"]
 # read-only for reviewing an intended engagement before it runs (§6).
 permission_mode = "act"
 
-# The single iteration ceiling (§3).
-max_iterations = 30
+# The single iteration ceiling (§3). Security work is legitimately long-running —
+# recon, enumeration, scanning and follow-up across many targets each cost turns,
+# and a 30-turn cap cut real engagements short. This is a runaway/cost backstop,
+# not a work budget: set high enough that a genuine assessment never trips it.
+max_iterations = 400
 
 [cell]
 # Unlike Optimus, Centurion's work is inherently networked — recon, scanning,

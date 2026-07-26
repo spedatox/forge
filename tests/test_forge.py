@@ -148,6 +148,55 @@ def test_malformed_job_request_rejected():
     assert ok.agent == "optimus" and ok.constraints.network is False
 
 
+# ── §7 chat memory: a turn carries its whole conversation, not just the last line
+def test_chat_request_carries_full_history():
+    """Regression: the chat path collapsed history to the last user line, so a
+    turn could not remember what was said two messages earlier."""
+    from forge.gate.protocol import job_from_chat_request
+
+    frame = {"chat_id": "c1", "cwd": "/repo", "history": [
+        {"role": "user", "content": "remember the word FALCON"},
+        {"role": "assistant", "content": "Noted: FALCON."},
+        {"role": "user", "content": "what word did I give you?"},
+    ]}
+    jr = job_from_chat_request(frame, "centurion")
+    assert len(jr.history) == 3                          # whole transcript carried
+    assert jr.history[-1]["role"] == "user"             # ends on a user turn
+    assert jr.task == "what word did I give you?"        # last user text kept
+
+
+def test_run_job_runs_over_the_whole_transcript():
+    """run_job seeds the loop with the full history when present, so the model's
+    turn sees everything already said — not a single-message cold start."""
+    from forge.agents.registry import AgentRegistry
+    from forge.config import ForgeSettings
+    from forge.gate.runner import run_job
+
+    seen: dict[str, list] = {}
+
+    def _step(messages):
+        seen["messages"] = list(messages)
+        return ("FALCON", [])                            # stop: no tool calls
+
+    request = JobRequest(agent="optimus", task="what word did I give you?",
+                         history=[
+                             {"role": "user", "content": "remember FALCON"},
+                             {"role": "assistant", "content": "Noted."},
+                             {"role": "user", "content": "what word did I give you?"},
+                         ])
+
+    async def _sink(_ev):
+        return None
+
+    settings = ForgeSettings.from_env()
+    registry = AgentRegistry.load()
+    term = asyncio.run(run_job(request, settings=settings, registry=registry,
+                               emit=_sink, model=ScriptedModel([_step])))
+    assert term.reason is StopReason.COMPLETED
+    # The model's first turn saw all three prior messages, not just the last.
+    assert [m["role"] for m in seen["messages"]] == ["user", "assistant", "user"]
+
+
 # ── §2 rebrandable core: no identity strings in the engine ───────────────────
 def test_engine_core_has_no_agent_identity_strings():
     core = ["warden/__init__.py", "warden/engine.py", "warden/state.py",
