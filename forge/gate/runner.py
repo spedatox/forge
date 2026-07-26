@@ -34,6 +34,7 @@ from forge.warden.ledger import TokenLedger
 from forge.warden.permissions import AllowList, Mode, PermissionEngine
 from forge.warden.state import StopReason, Terminal
 from forge.warden.tool import ToolContext
+from forge.warden.transcript import repair_transcript
 
 logger = logging.getLogger("forge.gate")
 
@@ -157,9 +158,13 @@ async def run_job(
         )
         # A chat turn carries the full prior transcript — seed the loop with it so
         # the agent remembers the conversation. A bare dispatch has no history and
-        # runs single-shot on `task`.
-        if request.history:
-            terminal = await warden.run_messages(request.history)
+        # runs single-shot on `task`. The transcript is repaired first: a previous
+        # turn that died mid-tool-call leaves a dangling tool_use the API rejects,
+        # and replaying that raw would make the agent forget the whole
+        # conversation instead of just the one botched turn.
+        history = repair_transcript(request.history) if request.history else []
+        if history:
+            terminal = await warden.run_messages(history)
         else:
             terminal = await warden.run(request.task)
         return terminal

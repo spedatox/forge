@@ -197,6 +197,42 @@ def test_run_job_runs_over_the_whole_transcript():
     assert [m["role"] for m in seen["messages"]] == ["user", "assistant", "user"]
 
 
+def test_run_job_repairs_a_dangling_transcript_before_replay():
+    """A previous turn that died after asking for a tool leaves a dangling
+    tool_use. run_job must repair it so the model gets a valid transcript
+    instead of the whole conversation failing on arrival."""
+    from forge.agents.registry import AgentRegistry
+    from forge.config import ForgeSettings
+    from forge.gate.runner import run_job
+
+    seen: dict[str, list] = {}
+
+    def _step(messages):
+        seen["messages"] = list(messages)
+        return ("recovered", [])
+
+    request = JobRequest(agent="optimus", task="carry on", history=[
+        {"role": "user", "content": "scan it"},
+        {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "t1", "name": "echo", "input": {"text": "x"}}]},
+        # died here — no tool_result — then the operator spoke again
+        {"role": "user", "content": "carry on"},
+    ])
+
+    async def _sink(_ev):
+        return None
+
+    term = asyncio.run(run_job(request, settings=ForgeSettings.from_env(),
+                               registry=AgentRegistry.load(),
+                               emit=_sink, model=ScriptedModel([_step])))
+    assert term.reason is StopReason.COMPLETED
+    # The dangling tool_use was answered before the trailing user turn.
+    msgs = seen["messages"]
+    assert [m["role"] for m in msgs] == ["user", "assistant", "user", "user"]
+    backfilled = [b for b in msgs[2]["content"] if b.get("type") == "tool_result"]
+    assert backfilled and backfilled[0]["tool_use_id"] == "t1"
+
+
 # ── §2 rebrandable core: no identity strings in the engine ───────────────────
 def test_engine_core_has_no_agent_identity_strings():
     core = ["warden/__init__.py", "warden/engine.py", "warden/state.py",
