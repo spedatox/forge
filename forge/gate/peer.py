@@ -38,6 +38,11 @@ logger = logging.getLogger("forge.gate.peer")
 _BACKOFF_START_S = 1.0
 _BACKOFF_MAX_S = 60.0
 _HEARTBEAT_S = 30.0
+# A chat that emits no frame for this long is logged as stalled. Purely
+# diagnostic — Mark VI's ExternalAgentProxy times the stream out at 300s; this
+# fires first so the peer's own logs show WHICH chat went quiet and when (the
+# visibility this class of hang otherwise lacks). It never aborts the run.
+_CHAT_SILENCE_LOG_S = 250.0
 # chat_event types Mark VI's ExternalAgentProxy understands (its _EVENT_MAP).
 _CHAT_FORWARD = frozenset({"chunk", "tool", "tool_result", "done", "error"})
 
@@ -200,7 +205,49 @@ class ForgePeer:
     def _spawn(self, coro) -> None:
         task = asyncio.create_task(coro)
         self._work.add(task)
-        task.add_done_callback(self._work.discard)
+        task.add_done_callback(self._on_task_done)
+
+    def _on_task_done(self, task: asyncio.Task) -> None:
+        """Retrieve a finished handler's outcome. Without this an exception in a
+        handler is never retrieved and vanishes unlogged — exactly how a chat
+        died mid-turn while Mark VI waited out its 300s idle timeout with no
+        terminal frame and no trace of why."""
+        self._work.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error("peer_task_crashed", exc_info=exc)
+
+    async def _safe_terminal_error(self, chat_id: str, detail: str) -> None:
+        """Best-effort terminal error frame so Mark VI never waits out its idle
+        timeout on a crashed run. Guarded: if the socket is already gone, Mark
+        VI's fail_agent path delivers the error instead, so a failure here is
+        nothing to escalate."""
+        try:
+            await self._send({
+                "type": "chat_event", "agent_id": self.cfg.agent_id,
+                "chat_id": chat_id,
+                "event": {"type": "error",
+                          "data": f"{self.cfg.name} hit an error mid-task "
+                                  f"({detail})."},
+            })
+        except Exception:  # noqa: BLE001 — the socket is gone; nothing to do
+            pass
+
+    async def _chat_watchdog(self, chat_id: str, last_activity) -> None:
+        """Log a chat that has gone silent past the ceiling. Diagnostic only: it
+        never aborts the run — a legitimate long scan is not a bug — but it turns
+        a silent stall into a dated log line naming the chat, so the next one is
+        traceable instead of invisible."""
+        loop = asyncio.get_running_loop()
+        while True:
+            await asyncio.sleep(_CHAT_SILENCE_LOG_S)
+            quiet = loop.time() - last_activity()
+            if quiet >= _CHAT_SILENCE_LOG_S:
+                logger.warning("chat_stream_silent",
+                               extra={"chat_id": chat_id,
+                                      "quiet_s": round(quiet, 1)})
 
     # ── Handlers ─────────────────────────────────────────────────────────────
     async def _handle_task(self, frame: dict[str, Any]) -> None:
@@ -225,6 +272,20 @@ class ForgePeer:
                 "type": "task_result", "agent_id": self.cfg.agent_id,
                 "task_id": request.job_id, "result": result, "status": status,
             })
+        except Exception as e:  # noqa: BLE001 — a crashed job must still answer
+            # A dispatch caller blocks on exactly one task_result; if run_job
+            # raises and we stay silent, that caller hangs until ITS timeout.
+            # Answer with an error result and log the trace we would have lost.
+            logger.exception("task_job_crashed", extra={"task_id": request.job_id})
+            try:
+                await self._send({
+                    "type": "task_result", "agent_id": self.cfg.agent_id,
+                    "task_id": request.job_id,
+                    "result": f"{self.cfg.name} hit an error: {type(e).__name__}: {e}",
+                    "status": "error",
+                })
+            except Exception:  # noqa: BLE001 — socket gone; caller times out
+                pass
         finally:
             self._chats.pop(request.job_id, None)
 
@@ -235,9 +296,11 @@ class ForgePeer:
         signal = asyncio.Event()
         self._chats[chat_id] = signal
         terminal_seen = False
+        last_activity = asyncio.get_running_loop().time()
 
         async def emit(ev: JobEvent) -> None:
-            nonlocal terminal_seen
+            nonlocal terminal_seen, last_activity
+            last_activity = asyncio.get_running_loop().time()
             if ev.type not in _CHAT_FORWARD:
                 return
             if ev.type in ("done", "error"):
@@ -245,6 +308,8 @@ class ForgePeer:
             await self._send({"type": "chat_event", "agent_id": self.cfg.agent_id,
                               "chat_id": chat_id, "event": job_event_to_chat_event(ev)})
 
+        watchdog = asyncio.create_task(
+            self._chat_watchdog(chat_id, lambda: last_activity))
         try:
             term = await run_job(request, settings=self.settings, registry=self.registry,
                                  emit=emit, signal=signal,
@@ -258,7 +323,16 @@ class ForgePeer:
                 data = term.final_text if final_type == "done" else (term.error or "run ended")
                 await self._send({"type": "chat_event", "agent_id": self.cfg.agent_id,
                                   "chat_id": chat_id, "event": {"type": final_type, "data": data}})
+        except Exception as e:  # noqa: BLE001 — a crashed run must still terminate
+            # This is the gap that let a chat die mid-turn in silence: run_job
+            # raised, control skipped straight past the terminal-frame emit to
+            # `finally`, and Mark VI waited out its full 300s idle timeout with
+            # no error and no trace. Emit the terminal frame and keep the trace.
+            logger.exception("chat_job_crashed", extra={"chat_id": chat_id})
+            if not terminal_seen:
+                await self._safe_terminal_error(chat_id, f"{type(e).__name__}: {e}")
         finally:
+            watchdog.cancel()
             self._chats.pop(chat_id, None)
 
 
