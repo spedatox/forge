@@ -14,6 +14,7 @@ every function degrades to plain text and nothing is lost but the shading.
 from __future__ import annotations
 
 import os
+import re
 import sys
 
 _ENABLED = False
@@ -28,6 +29,9 @@ GLYPHS = {
     "▲": "#", "⏺": "*", "↳": "->", "✗": "x", "◆": "~", "⚠": "!!",
     "⏹": "[]", "─": "-", "█": "#", "░": ".", "⏎": "\\n", "…": "...",
     "·": ".", "›": ">", "═": "=",
+    # The transcript grammar: the result gutter and the prompt. Fallbacks
+    # keep the two-column shape, which is what the layout depends on.
+    "⎿": "\_", "❯": ">", "✻": "*", "│": "|",
 }
 
 
@@ -99,6 +103,18 @@ def _probe_unicode() -> bool:
         return True
     except (UnicodeEncodeError, LookupError):
         return False
+
+
+_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def visible_width(text: str) -> int:
+    """How wide a styled string actually prints.
+
+    Colour codes are zero-width but count in `len`, so any layout that measures
+    a painted string puts its column somewhere different on every row. Anything
+    aligning two columns has to measure with this instead."""
+    return len(_ESCAPE.sub("", text))
 
 
 def unicode_ok() -> bool:

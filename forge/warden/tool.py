@@ -72,6 +72,31 @@ class Tool(abc.ABC):
     description: str
     Args: type[BaseModel]            # the input schema
 
+    display_name: str = ""
+    """What the operator sees in a transcript, e.g. `Read` for `read_file`.
+
+    Separate from `name` because the two are read by different audiences for
+    different reasons. The model needs a wire identifier that is stable and
+    unambiguous; a person scanning what just happened needs a short verb. Empty
+    means "derive it" (see `label`), so a tool only sets this when the
+    derivation would be wrong.
+    """
+
+    @classmethod
+    def label(cls) -> str:
+        """The display name, derived from the wire name when not declared.
+
+        `read_file` → `Read`, `run_command` → `Run`, `web_search` → `WebSearch`.
+        The trailing noun goes because the argument already says what is being
+        read or run, and `Read(calc.py)` carries more in less space than
+        `read_file  calc.py`."""
+        if cls.display_name:
+            return cls.display_name
+        parts = cls.name.split("_")
+        if len(parts) > 1 and parts[-1] in ("file", "command"):
+            parts = parts[:-1]
+        return "".join(p.capitalize() for p in parts)
+
     # ── Harness-side, fail-closed defaults (§4) ──────────────────────────────
     # Declared as constants because most tools have one honest answer for every
     # input. Read through the methods below, never directly: a tool whose answer

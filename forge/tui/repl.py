@@ -114,7 +114,7 @@ async def _loop(session: Session, settings: ForgeSettings, extensions, verbose: 
         # anyway — when deciding what to type next.
         ansi.write()
         status.write(session)
-        entry = await bar.read(ansi.paint("› ", "cyan"))
+        entry = await bar.read(ansi.paint("❯ ", "cyan"))
         if entry.is_eof:
             ansi.write()
             return 0

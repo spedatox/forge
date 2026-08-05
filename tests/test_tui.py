@@ -107,16 +107,29 @@ def _render(events, verbose=False) -> str:
 
 
 def test_model_prose_and_harness_actions_are_visually_distinct():
-    """The one distinction a transcript must never blur."""
+    """The one distinction a transcript must never blur.
+
+    Three columns, not two: the model's prose at the margin, a tool CALL marked
+    and at the margin beside it, and the RESULT indented into the gutter
+    underneath. A result that sat at the same depth as the call would read as
+    another event rather than as that call's answer.
+    """
     out = _render([
         {"type": "chunk", "data": "Looking at it."},
         {"type": "tool", "data": {"id": "1", "name": "grep", "input": {"pattern": "TODO"}}},
         {"type": "tool_result", "data": {"tool_use_id": "1", "content": "3 files", "is_error": False}},
     ])
-    assert "Looking at it." in out
-    assert "grep" in out and "TODO" in out
-    # Harness lines are indented; the model's prose is at the margin.
-    assert any(line.startswith("  ") and "grep" in line for line in out.splitlines())
+    lines = [ln for ln in out.splitlines() if ln.strip()]
+
+    prose = [ln for ln in lines if "Looking at it." in ln][0]
+    call = [ln for ln in lines if "Grep" in ln][0]
+    result = [ln for ln in lines if "3 files" in ln][0]
+
+    assert not prose.startswith(" ")             # the model speaks at the margin
+    assert call.lstrip().startswith(("⏺", "*"))  # marked, and at the margin too
+    assert "Grep(TODO)" in call                  # verb and object in one token
+    assert result.startswith("  ")               # the answer is subordinate
+    assert result.strip().startswith(("⎿", "\\_"))
 
 
 def test_a_failed_tool_is_marked_as_such():
@@ -125,13 +138,55 @@ def test_a_failed_tool_is_marked_as_such():
     assert "boom" in out
 
 
-def test_results_are_one_line_unless_verbose():
+def test_a_result_keeps_its_shape_but_not_its_length():
+    """Bounded lines, not one flattened line.
+
+    Collapsing newlines turned a shell result into `exit_code: 0 ⏎ stdout: ⏎ 5`
+    — illegible at exactly the moment the operator is checking whether a
+    command worked. Structure is most of what makes a result scannable, so it
+    is kept and the tail is dropped instead.
+    """
+    from forge.tui.render import RESULT_LINES
+
     long = "\n".join(f"line {i}" for i in range(50))
     quiet = _render([{"type": "tool_result", "data": {"tool_use_id": "1", "content": long}}])
     loud = _render([{"type": "tool_result", "data": {"tool_use_id": "1", "content": long}}],
                    verbose=True)
-    assert len(quiet.splitlines()) == 1
-    assert len(loud.splitlines()) > 10
+
+    shown = [ln for ln in quiet.splitlines() if ln.strip()]
+    assert 1 < len(shown) <= RESULT_LINES + 1      # + the "…" counter
+    assert "line 0" in quiet and "line 49" not in quiet
+    assert "+46 lines" in quiet and "ctrl+o" in quiet
+    assert len(loud.splitlines()) > 10             # verbose still shows it all
+
+
+def test_a_short_result_gets_no_truncation_notice():
+    out = _render([{"type": "tool_result", "data": {"tool_use_id": "1", "content": "3 files"}}])
+    assert "3 files" in out and "ctrl+o" not in out
+
+
+def test_parallel_results_name_their_tool():
+    """Results arrive as a batch under a batch of calls; unlabelled, an answer
+    belongs to no question."""
+    out = _render([
+        {"type": "tool", "data": {"id": "a", "name": "grep", "input": {"pattern": "x"}}},
+        {"type": "tool", "data": {"id": "b", "name": "glob", "input": {"pattern": "*"}}},
+        {"type": "tool_result", "data": {"tool_use_id": "a", "content": "3 hits"}},
+        {"type": "tool_result", "data": {"tool_use_id": "b", "content": "2 files"}},
+    ])
+    assert "Grep  3 hits" in out
+    assert "Glob  2 files" in out, "the second result in a batch lost its label"
+
+
+def test_a_lone_result_is_not_labelled():
+    """With one call in flight the pairing is already obvious, and the label
+    would be repeating the line above."""
+    out = _render([
+        {"type": "tool", "data": {"id": "a", "name": "grep", "input": {"pattern": "x"}}},
+        {"type": "tool_result", "data": {"tool_use_id": "a", "content": "3 hits"}},
+    ])
+    assert "Grep  3 hits" not in out
+    assert "3 hits" in out
 
 
 def test_compaction_is_announced_to_the_operator():

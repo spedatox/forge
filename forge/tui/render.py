@@ -35,6 +35,9 @@ class StreamRenderer:
         # printed on top of a half-drawn frame is unreadable.
         self.spinner = spinner
         self._wrote_text = False        # has model prose landed this turn?
+        self._last_was_harness = False  # was the last thing written a tool line?
+        self._in_flight: set[str] = set()
+        self._batch = 0                 # calls in the current parallel batch
         self._tool_names: dict[str, str] = {}
         self.saw_error = False          # so the turn summary does not repeat it
 
@@ -59,6 +62,12 @@ class StreamRenderer:
         if not self._wrote_text:
             ansi.write()
             self._wrote_text = True
+        elif self._last_was_harness:
+            # Coming back from a tool block: without this the model's next
+            # sentence starts on the line under a gutter and the two read as
+            # one paragraph written by the same voice.
+            ansi.write()
+        self._last_was_harness = False
         # No newline: deltas arrive mid-word and the point of streaming is that
         # it appears at the speed it is produced.
         ansi.write(text, end="")
@@ -73,12 +82,20 @@ class StreamRenderer:
             return
         name = str(data.get("name", "?"))
         self._tool_names[str(data.get("id"))] = name
+        self._in_flight.add(str(data.get("id")))
+        self._batch = max(self._batch, len(self._in_flight))
         if self.spinner is not None:
             self.spinner.set_status(f"Running {name}")
         args = data.get("input") or {}
+        target = _summarize_args(args)
         ansi.write()
-        ansi.write(ansi.paint("  ⏺ ", "cyan") + ansi.paint(name, "bold", "cyan")
-                   + "  " + ansi.paint(_summarize_args(args), "grey"))
+        # `⏺ Read(calc.py)` — verb and object in one token, at the margin. The
+        # older `read_file  calc.py` said the same thing in more space and read
+        # as two separate facts.
+        ansi.write(ansi.paint("⏺ ", "cyan")
+                   + ansi.paint(_label(name), "bold")
+                   + ansi.paint(f"({target})" if target else "", "grey"))
+        self._last_was_harness = True
 
     def _on_tool_result(self, data: Any) -> None:
         if not isinstance(data, dict):
@@ -89,28 +106,32 @@ class StreamRenderer:
         # An operator-facing rendering wins over the model-facing text: for an
         # edit that is the difference between "Edited calc.py (1 replacement)"
         # and seeing what actually landed in the file.
+        call_id = str(data.get("tool_use_id"))
+        # Tools run in parallel, so results arrive as a batch under a batch
+        # of calls. With one in flight the pairing is obvious; with several
+        # it is not, and an unlabelled answer belongs to no question.
+        prefix = ""
+        if self._batch > 1:
+            prefix = _label(self._tool_names.get(call_id, "")) + "  "
+        self._in_flight.discard(call_id)
+        if not self._in_flight:
+            self._batch = 0
+        self._last_was_harness = True
+
         display = data.get("display")
         if display and not failed:
-            self._write_display(str(display))
+            self._write_display(str(display), prefix)
             return
-
-        marker = ansi.paint("    ✗ ", "red") if failed else ansi.paint("    ↳ ", "grey")
 
         if self.verbose:
             body = content
         else:
-            # One line by default. The full result is in the transcript and the
-            # spill file; a terminal that dumps 40K of grep output buries the
-            # conversation it is supposed to be showing.
-            body = ansi.truncate(content, max(20, ansi.terminal_width() - 10))
-            if body != content and self.on_truncated is not None:
-                name = self._tool_names.get(str(data.get("tool_use_id")), "tool")
-                self.on_truncated(name, content)
-        style = "red" if failed else "grey"
-        for i, line in enumerate(body.splitlines() or [""]):
-            ansi.write((marker if i == 0 else "      ") + ansi.paint(line, style))
+            body = _preview(content)
+            if body != content.strip() and self.on_truncated is not None:
+                self.on_truncated(self._tool_names.get(call_id, "tool"), content)
+        _write_gutter(prefix + body, failed=failed)
 
-    def _write_display(self, display: str) -> None:
+    def _write_display(self, display: str, prefix: str = "") -> None:
         """A tool's operator-facing rendering — today, a diff.
 
         Colour is applied here rather than in the tool, so the same text can go
@@ -118,9 +139,9 @@ class StreamRenderer:
         lines = display.splitlines()
         if not lines:
             return
-        ansi.write(ansi.paint("    ↳ ", "grey") + ansi.paint(lines[0], "bold"))
+        _write_gutter(prefix + lines[0])
         for line in lines[1:]:
-            ansi.write("      " + _paint_diff_line(line))
+            ansi.write(_INDENT + _paint_diff_line(line))
 
     # ── Harness housekeeping the operator should still see ───────────────────
     def _on_compact(self, data: Any) -> None:
@@ -149,6 +170,57 @@ class StreamRenderer:
                 f"  ({int(100 * data.get('fullness', 0))}% full)", "dim"))
 
 
+# The transcript is two columns: what happened at the margin, what came back
+# beneath it. `⎿` opens the second column and everything after it lines up
+# under that opening, so a result is visibly subordinate to the call that
+# produced it rather than another event in the same list.
+GUTTER = "  ⎿  "          # two spaces, glyph, two spaces
+_INDENT = " " * 5
+
+
+def _write_gutter(text: str, failed: bool = False) -> None:
+    """Write a result under its call, wrapped into the gutter."""
+    lines = text.splitlines() or [""]
+    style = "red" if failed else "grey"
+    head = ansi.paint(GUTTER, "red" if failed else "dim")
+    ansi.write(head + ansi.paint(lines[0], style))
+    for line in lines[1:]:
+        ansi.write(_INDENT + ansi.paint(line, style))
+
+
+RESULT_LINES = 4
+"""How much of a result is shown before it is cut.
+
+Enough for a shell result — exit code, a line of stdout, a line of stderr —
+and not enough for a grep to bury the conversation it is part of. ctrl+o
+puts back whatever this cut."""
+
+
+def _preview(content: str) -> str:
+    """The readable head of a tool result, keeping its LINES.
+
+    Flattening newlines turned a shell result into `exit_code: 0 ⏎ stdout: ⏎
+    5`, which is illegible at exactly the moment the operator is checking
+    whether a command worked. Structure is most of what makes a result
+    scannable, so it is kept and the tail is dropped instead."""
+    width = max(20, ansi.terminal_width() - 8)
+    lines = [ln.rstrip() for ln in content.strip().splitlines()]
+    lines = [ln for ln in lines if ln.strip()] or [""]
+    head = [ansi.truncate(ln, width) for ln in lines[:RESULT_LINES]]
+    if len(lines) > RESULT_LINES:
+        head.append(f"… +{len(lines) - RESULT_LINES} lines  (ctrl+o)")
+    return "\n".join(head)
+
+
+def _label(wire_name: str) -> str:
+    """`read_file` → `Read`. The argument already says what is being read,
+    so the noun in the tool name is repetition."""
+    parts = wire_name.split("_")
+    if len(parts) > 1 and parts[-1] in ("file", "command"):
+        parts = parts[:-1]
+    return "".join(p.capitalize() for p in parts)
+
+
 def _summarize_args(args: dict[str, Any]) -> str:
     """The one detail that says what a call will actually do.
 
@@ -159,12 +231,9 @@ def _summarize_args(args: dict[str, Any]) -> str:
         value = args.get(key)
         if isinstance(value, str) and value:
             return ansi.truncate(value, max(20, ansi.terminal_width() - 24))
-    if not args:
-        return ""
-    try:
-        return ansi.truncate(json.dumps(args, default=str), 60)
-    except (TypeError, ValueError):
-        return ""
+    # No recognisable target: show nothing. A dump of the raw arguments is
+    # unreadable at a glance and costs the width the tool name needs.
+    return ""
 
 
 # Provider errors arrive as a raw JSON blob wrapped in an SDK exception name.
@@ -212,35 +281,49 @@ def humanize_error(raw: str) -> str:
 # cannot guess and will otherwise never discover, because nothing in a bare
 # prompt hints that they exist. `/help` covers the rest.
 _TIPS = (
-    ("!cmd", "run a shell command directly — no model turn, no tokens"),
-    ("@file", "complete a path from this workspace"),
-    ("shift+tab", "switch between act and plan mode"),
+    ("!cmd", "shell, no model turn"),
+    ("@file", "complete a path"),
+    ("/", "commands"),
+    ("shift+tab", "act ⇄ plan"),
 )
 
 
 def banner(agent: str, model: str, workspace: str, tools: int,
            tips: bool = True) -> str:
-    """The opening frame: who is running, on what, where, and how to begin.
+    """The opening frame: a mark, what is running, and the keys nobody guesses.
 
-    The tips are the part that earns its space. A prompt with a cursor in it
-    gives no indication that `!` or `@` mean anything, so without this they are
-    features nobody uses — and the first of them, running a command without
-    spending a turn, is the one that saves the most money.
+    Two columns with a rule between them. The left says what this is, the right
+    says how to begin — which is the only thing a first-time reader needs and
+    the last thing a bare prompt provides.
     """
-    lines = [
-        "",
-        ansi.paint("  ▲ FORGE", "bold", "cyan") + ansi.paint(f"  {agent}", "cyan"),
-        ansi.paint(f"    {model}", "grey"),
-        ansi.paint(f"    {workspace}", "grey"),
-        ansi.paint(f"    {tools} tools · /help for commands", "dim"),
+    width = min(ansi.terminal_width(), 92)
+    left = [
+        ansi.paint("▲ FORGE", "bold", "cyan"),
+        ansi.paint(agent, "grey"),
+        ansi.paint(model, "dim"),
+        ansi.paint(ansi.truncate(workspace, 34), "dim"),
     ]
-    if tips:
-        width = max(len(key) for key, _ in _TIPS)
-        lines.append("")
-        for key, what in _TIPS:
-            lines.append(ansi.paint(f"    {key:<{width}}  ", "cyan")
-                         + ansi.paint(what, "dim"))
+    right = [
+        ansi.paint("Getting started", "bold"),
+        ansi.paint(f"{tools} tools · /help for commands", "dim"),
+        "",
+    ] + ([ansi.paint(f"{key:<10}", "cyan") + ansi.paint(what, "dim")
+          for key, what in _TIPS] if tips else [])
+
+    # Padded on the *visible* width: a styled string is longer than it looks,
+    # and measuring the raw one puts the rule in a different place on every row.
+    gap = 4
+    left_width = max((ansi.visible_width(x) for x in left), default=0)
+    rows = max(len(left), len(right))
+    lines = [""]
+    for i in range(rows):
+        l = left[i] if i < len(left) else ""
+        r = right[i] if i < len(right) else ""
+        pad = " " * max(0, left_width - ansi.visible_width(l))
+        lines.append("  " + l + pad + " " * gap + ansi.paint("│", "dim")
+                     + " " * gap + r)
     lines.append("")
+    lines.append(ansi.paint("  " + "─" * max(10, min(width - 4, 76)), "dim"))
     return "\n".join(lines)
 
 
