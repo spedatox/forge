@@ -331,7 +331,7 @@ async def _keys(args: str, session: "Session") -> CommandResult:
         ("ctrl+r", "search that history"),
         ("esc then enter", "newline instead of submitting"),
         ("tab", "complete a /command or an @path"),
-        ("shift+tab", "switch act ⇄ plan"),
+        ("shift+tab", "switch act / plan"),
         ("ctrl+o", "reprint the last shortened tool output in full"),
         ("ctrl+c", "interrupt the running turn (again at an empty prompt exits)"),
         ("ctrl+d", "end the session"),

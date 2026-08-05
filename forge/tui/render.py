@@ -92,7 +92,7 @@ class StreamRenderer:
         # `⏺ Read(calc.py)` — verb and object in one token, at the margin. The
         # older `read_file  calc.py` said the same thing in more space and read
         # as two separate facts.
-        ansi.write(ansi.paint("⏺ ", "cyan")
+        ansi.write(ansi.paint("● ", "cyan")
                    + ansi.paint(_label(name), "bold")
                    + ansi.paint(f"({target})" if target else "", "grey"))
         self._last_was_harness = True
@@ -174,7 +174,7 @@ class StreamRenderer:
 # beneath it. `⎿` opens the second column and everything after it lines up
 # under that opening, so a result is visibly subordinate to the call that
 # produced it rather than another event in the same list.
-GUTTER = "  ⎿  "          # two spaces, glyph, two spaces
+GUTTER = "  └  "          # two spaces, glyph, two spaces
 _INDENT = " " * 5
 
 
@@ -284,46 +284,58 @@ _TIPS = (
     ("!cmd", "shell, no model turn"),
     ("@file", "complete a path"),
     ("/", "commands"),
-    ("shift+tab", "act ⇄ plan"),
+    ("shift+tab", "act / plan"),
 )
+
+
+def _box(rows: list[str], width: int) -> list[str]:
+    """A framed block. Rows are padded on their VISIBLE width — a painted
+    string is longer than it looks, so measuring the raw one puts the right
+    edge somewhere different on every line."""
+    out = [ansi.paint("╭" + "─" * (width - 2) + "╮", "dim")]
+    for row in rows:
+        pad = " " * max(0, width - 4 - ansi.visible_width(row))
+        out.append(ansi.paint("│", "dim") + " " + row + pad + " "
+                   + ansi.paint("│", "dim"))
+    out.append(ansi.paint("╰" + "─" * (width - 2) + "╯", "dim"))
+    return out
 
 
 def banner(agent: str, model: str, workspace: str, tools: int,
            tips: bool = True) -> str:
-    """The opening frame: a mark, what is running, and the keys nobody guesses.
+    """The opening frame: what is running, where, and how to begin.
 
-    Two columns with a rule between them. The left says what this is, the right
-    says how to begin — which is the only thing a first-time reader needs and
-    the last thing a bare prompt provides.
+    A frame rather than loose lines, because the first screen has to read as
+    one object. Loose lines under a heading look like output that has already
+    started, which is exactly what an operator should not think before they
+    have typed anything.
     """
-    width = min(ansi.terminal_width(), 92)
-    left = [
-        ansi.paint("▲ FORGE", "bold", "cyan"),
-        ansi.paint(agent, "grey"),
-        ansi.paint(model, "dim"),
-        ansi.paint(ansi.truncate(workspace, 34), "dim"),
-    ]
-    right = [
-        ansi.paint("Getting started", "bold"),
-        ansi.paint(f"{tools} tools · /help for commands", "dim"),
-        "",
-    ] + ([ansi.paint(f"{key:<10}", "cyan") + ansi.paint(what, "dim")
-          for key, what in _TIPS] if tips else [])
+    width = max(46, min(ansi.terminal_width() - 2, 78))
+    inner = width - 4
 
-    # Padded on the *visible* width: a styled string is longer than it looks,
-    # and measuring the raw one puts the rule in a different place on every row.
-    gap = 4
-    left_width = max((ansi.visible_width(x) for x in left), default=0)
-    rows = max(len(left), len(right))
-    lines = [""]
-    for i in range(rows):
-        l = left[i] if i < len(left) else ""
-        r = right[i] if i < len(right) else ""
-        pad = " " * max(0, left_width - ansi.visible_width(l))
-        lines.append("  " + l + pad + " " * gap + ansi.paint("│", "dim")
-                     + " " * gap + r)
+    rows = [
+        ansi.paint("▲ FORGE", "bold", "cyan") + ansi.paint(f"   {agent}", "grey"),
+        "",
+        ansi.paint(f"{model}", "dim"),
+        ansi.paint(ansi.truncate(workspace, inner), "dim"),
+    ]
+    lines = [""] + _box(rows, width)
+
+    if tips:
+        # Two per row: four one-line hints stacked vertically read as a menu,
+        # which invites reading them all before starting. Paired, they read as
+        # a footnote, which is what they are.
+        lines.append("")
+        pairs = [_TIPS[i:i + 2] for i in range(0, len(_TIPS), 2)]
+        for pair in pairs:
+            cells = [ansi.paint(f"{key:<10}", "cyan") + ansi.paint(f"{what:<24}", "dim")
+                     for key, what in pair]
+            lines.append("  " + "".join(cells).rstrip())
     lines.append("")
-    lines.append(ansi.paint("  " + "─" * max(10, min(width - 4, 76)), "dim"))
+    lines.append(ansi.paint(f"  {tools} tools", "dim")
+                 + ansi.paint("  ·  ", "dim")
+                 + ansi.paint("/help", "cyan") + ansi.paint(" for commands", "dim"))
+    lines.append("")
     return "\n".join(lines)
 
 

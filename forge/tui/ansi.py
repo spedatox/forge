@@ -26,12 +26,17 @@ _UNICODE = False
 # the operator typed anything. The fallbacks are not decorative equivalents;
 # they are chosen so the layout still parses at a glance.
 GLYPHS = {
-    "▲": "#", "⏺": "*", "↳": "->", "✗": "x", "◆": "~", "⚠": "!!",
-    "⏹": "[]", "─": "-", "█": "#", "░": ".", "⏎": "\\n", "…": "...",
-    "·": ".", "›": ">", "═": "=",
-    # The transcript grammar: the result gutter and the prompt. Fallbacks
-    # keep the two-column shape, which is what the layout depends on.
-    "⎿": "\_", "❯": ">", "✻": "*", "│": "|",
+    # Chosen for FONT coverage, not for looking clever. A terminal that can
+    # encode a character still renders a hollow box when the font has no glyph
+    # for it, and tofu in the layout is worse than a plainer character that
+    # draws. Box-drawing and geometric shapes are in essentially every
+    # monospace font; the dingbats and technical symbols are not.
+    "▲": "#", "●": "*", "└": "\_", "─": "-", "│": "|",
+    "╭": ".", "╮": ".", "╰": "'", "╯": "'",
+    "✗": "x", "◆": "~", "⚠": "!!", "⏹": "[]", "→": "->",
+    "█": "#", "░": ".", "⏎": "\n", "…": "...", "·": ".", "›": ">", "═": "=",
+    "◐": "|", "◓": "/", "◑": "-", "◒": "\\",
+    "—": "-", "↑": "^", "↓": "v", "⇄": "/", "⏶": "^",
 }
 
 

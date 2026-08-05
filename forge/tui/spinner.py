@@ -29,7 +29,7 @@ import time
 
 from forge.tui import ansi
 
-FRAMES = ("✻", "✼", "✽", "✻", "✦", "✧")
+FRAMES = ("◐", "◓", "◑", "◒")
 FALLBACK_FRAMES = ("|", "/", "-", "\\")
 
 # Rotated slowly, so the line reads as considered rather than frantic.

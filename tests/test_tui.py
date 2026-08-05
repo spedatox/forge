@@ -57,13 +57,35 @@ def _capture(fn) -> str:
 
 # ── Encoding: the thing that killed the first run ───────────────────────────
 def test_glyphs_fall_back_when_the_terminal_cannot_encode_them():
-    """A Windows console defaults to cp1252 and cannot encode a single one of
-    these. An UnicodeEncodeError while drawing the banner would end the session
-    before the operator typed anything."""
+    """A Windows console defaults to cp1252 and cannot encode any of these. An
+    UnicodeEncodeError while drawing the banner would end the session before the
+    operator typed anything."""
     with patch.object(ansi, "_UNICODE", False):
-        out = ansi.glyphs("▲ FORGE ⏺ tool ↳ result ✗ error")
-    assert "▲" not in out and "⏺" not in out
+        out = ansi.glyphs("▲ FORGE ● tool └ result ✗ error")
+    assert "▲" not in out and "●" not in out and "└" not in out
     assert "FORGE" in out and "error" in out
+
+
+def test_every_glyph_the_tui_emits_has_a_fallback():
+    """The contract, not a list — a hardcoded set drifts the moment someone
+    picks a new character, and the failure is a hollow box in the layout that
+    only shows up on a machine nobody tested on."""
+    import re
+    from pathlib import Path
+
+    source = Path(ansi.__file__).parent
+    emitted: set[str] = set()
+    for path in source.glob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        # Only string literals — prose in docstrings and comments is not drawn.
+        for literal in re.findall(r'"([^"\n]*)"|\'([^\'\n]*)\'', text):
+            for chunk in literal:
+                emitted.update(ch for ch in chunk if ord(ch) > 0x2000)
+
+    missing = sorted(ch for ch in emitted if ch not in ansi.GLYPHS)
+    assert not missing, (
+        f"these are drawn but have no ASCII fallback: {missing} — "
+        "add them to ansi.GLYPHS or use a character that is already there")
 
 
 def test_glyphs_pass_through_when_the_terminal_can():
