@@ -81,6 +81,8 @@ class Session:
     turns: int = 0
     _mode: str = ""
     last_truncated: tuple[str, str] | None = None
+    input_bar: Any = None
+    """The live input line, so a command can change how it reads keys."""
     """(tool, full result) for the most recent shortened output — what
     ctrl+o puts back."""
 

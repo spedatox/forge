@@ -202,3 +202,128 @@ def test_keybindings_documents_the_undiscoverable_ones(tmp_path):
     text = _run("keybindings", "", _Session(tmp_path, _Cell())).text
     for key in ("ctrl+r", "shift+tab", "ctrl+o", "!cmd", "@path"):
         assert key in text
+
+
+# ── /vim, /copy, /mcp, /permissions ─────────────────────────────────────────
+
+
+class _Bar:
+    """Stands in for the input line. `_session` present means a real editor."""
+
+    def __init__(self, has_editor=True, vi=False):
+        self._session = object() if has_editor else None
+        self._vi = vi
+
+    @property
+    def vi_mode(self):
+        return self._vi
+
+    def set_vi_mode(self, on):
+        self._vi = bool(on)
+        return self._vi
+
+
+class _AllowList:
+    def __init__(self, entries=(), path=None):
+        self.entries = set(entries)
+        self.path = path
+
+
+def _session_with(tmp_path, **kw):
+    s = _Session(tmp_path, _Cell())
+    s.input_bar = kw.pop("bar", None)
+    s.allowlist = kw.pop("allowlist", _AllowList())
+    s.tools = kw.pop("tools", {})
+    s.messages = kw.pop("messages", [])
+    return s
+
+
+def test_vim_toggles_and_reports_the_mode(tmp_path):
+    session = _session_with(tmp_path, bar=_Bar())
+
+    assert "vi" in _run("vim", "", session).text
+    assert "emacs" in _run("vim", "", session).text
+    assert "vi" in _run("vim", "on", session).text
+    assert "emacs" in _run("vim", "off", session).text
+
+
+def test_vim_without_an_editor_does_not_send_you_to_reinstall(tmp_path):
+    """prompt_toolkit may be installed and still unable to drive the terminal —
+    telling the operator to install it sends them to fix the wrong thing."""
+    import forge.tui.input as input_mod
+
+    session = _session_with(tmp_path, bar=_Bar(has_editor=False))
+    text = _run("vim", "", session).text
+
+    if input_mod.AVAILABLE:
+        assert "could not drive this terminal" in text
+        assert "pip install" not in text
+    else:
+        assert "pip install" in text
+
+
+def test_mcp_groups_tools_by_the_server_in_their_name(tmp_path):
+    """The registry itself says which server contributed what — no second source."""
+    session = _session_with(tmp_path, tools={
+        "mcp__github__create_issue": object(),
+        "mcp__github__list_prs": object(),
+        "mcp__fs__read": object(),
+        "read_file": object(),          # not MCP; must not appear
+    })
+
+    text = _run("mcp", "", session).text
+
+    assert "github  (2 tools)" in text
+    assert "fs  (1 tools)" in text
+    assert "read_file" not in text
+
+
+def test_mcp_with_nothing_connected_says_where_to_configure_it(tmp_path):
+    text = _run("mcp", "", _session_with(tmp_path)).text
+    assert "No MCP servers connected" in text
+    assert "mcp.json" in text
+
+
+def test_permissions_lists_what_was_approved(tmp_path):
+    session = _session_with(tmp_path, allowlist=_AllowList({"Bash(git *)"}, tmp_path / "a.json"))
+    text = _run("permissions", "", session).text
+
+    assert "Bash(git *)" in text
+    assert "act" in text
+
+
+def test_permissions_states_what_cannot_be_pre_approved(tmp_path):
+    """The gate is the one thing an allowlist cannot switch off; saying so is
+    the difference between a surprise prompt and an expected one."""
+    text = _run("permissions", "", _session_with(tmp_path)).text
+    assert "cannot be" in text and "pre-approved" in text
+
+
+def test_copy_with_nothing_to_copy(tmp_path):
+    assert "Nothing to copy" in _run("copy", "", _session_with(tmp_path)).text
+
+
+def test_copy_finds_the_last_assistant_text_through_content_blocks(tmp_path):
+    from forge.tui.commands import _last_assistant_text
+
+    session = _session_with(tmp_path, messages=[
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": [
+            {"type": "text", "text": "the answer"},
+            {"type": "tool_use", "id": "t", "name": "x", "input": {}},
+        ]},
+    ])
+    assert _last_assistant_text(session) == "the answer"
+
+
+def test_copy_ignores_a_trailing_tool_only_turn(tmp_path):
+    """The last assistant message may be tool calls with no prose."""
+    from forge.tui.commands import _last_assistant_text
+
+    session = _session_with(tmp_path, messages=[
+        {"role": "assistant", "content": "real answer"},
+        {"role": "user", "content": [{"type": "tool_result", "content": "x"}]},
+        {"role": "assistant", "content": [{"type": "tool_use", "id": "t",
+                                           "name": "x", "input": {}}]},
+    ])
+    assert _last_assistant_text(session) == "real answer"

@@ -359,3 +359,130 @@ async def _export(args: str, session: "Session") -> CommandResult:
 def ansi_dim(text: str) -> str:
     from forge.tui import ansi
     return ansi.paint(text, "dim")
+
+
+# ── Editing, clipboard, and what is configured ───────────────────────────────
+
+
+@command("vim", "vi keys in the input line, or back to emacs")
+async def _vim(args: str, session: "Session") -> CommandResult:
+    from forge.tui.input import AVAILABLE
+
+    bar = session.input_bar
+    if bar is None or not getattr(bar, "_session", None):
+        # Two different causes, and telling the operator to install a package
+        # they already have sends them to fix the wrong thing.
+        return CommandResult(
+            "  No line editor is active, so there are no vi keys to switch to.\n"
+            + ("  prompt_toolkit is installed but could not drive this terminal —\n"
+               "  this happens with piped input, and under Git Bash on Windows."
+               if AVAILABLE else
+               "  Install the `tui` extra: pip install -e \".[tui]\""))
+    want = {"on": True, "off": False}.get(args.strip().lower(), not bar.vi_mode)
+    now = bar.set_vi_mode(want)
+    return CommandResult(f"  Input mode: {'vi' if now else 'emacs'}")
+
+
+def _clipboard_command() -> list[str] | None:
+    """The platform's "read stdin into the clipboard" command, if there is one.
+
+    Done with the tool the OS already ships rather than a dependency: pyperclip
+    would be a third package to install, on every platform, to move one string.
+    """
+    import shutil
+    import sys
+
+    if sys.platform == "win32":
+        return ["clip"]
+    if sys.platform == "darwin":
+        return ["pbcopy"]
+    if shutil.which("wl-copy"):
+        return ["wl-copy"]
+    if shutil.which("xclip"):
+        return ["xclip", "-selection", "clipboard"]
+    if shutil.which("xsel"):
+        return ["xsel", "--clipboard", "--input"]
+    return None
+
+
+def _last_assistant_text(session: "Session") -> str:
+    for message in reversed(session.messages):
+        if message.get("role") != "assistant":
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts = [b.get("text", "") for b in content
+                     if isinstance(b, dict) and b.get("type") == "text"]
+            if any(parts):
+                return "\n".join(p for p in parts if p)
+    return ""
+
+
+@command("copy", "put the last reply on the clipboard")
+async def _copy(args: str, session: "Session") -> CommandResult:
+    import subprocess
+
+    text = _last_assistant_text(session)
+    if not text:
+        return CommandResult("  Nothing to copy yet.")
+    argv = _clipboard_command()
+    if argv is None:
+        return CommandResult(
+            "  No clipboard tool found. Install wl-clipboard, xclip or xsel, "
+            "or use /export to write the conversation to a file.")
+    try:
+        subprocess.run(argv, input=text.encode("utf-8"), check=True, timeout=10)
+    except (OSError, subprocess.SubprocessError) as e:
+        return CommandResult(f"  Clipboard failed ({argv[0]}): {e}")
+    return CommandResult(f"  Copied {len(text)} characters.")
+
+
+@command("mcp", "MCP servers and the tools they contributed")
+async def _mcp(args: str, session: "Session") -> CommandResult:
+    """MCP tools are named mcp__{server}__{tool}, so the registry itself says
+    which server contributed what — no second source to fall out of step."""
+    servers: dict[str, list[str]] = {}
+    for name in session.tools:
+        if not name.startswith("mcp__"):
+            continue
+        _, _, rest = name.partition("mcp__")
+        server, _, tool = rest.partition("__")
+        servers.setdefault(server, []).append(tool or rest)
+
+    if not servers:
+        return CommandResult(
+            "  No MCP servers connected.\n"
+            "  Configure them in .forge/mcp.json; tools appear as mcp__<server>__<tool>.")
+    lines = []
+    for server, tools in sorted(servers.items()):
+        lines.append(f"  {server}  ({len(tools)} tools)")
+        lines.extend(f"      {t}" for t in sorted(tools))
+    return CommandResult("\n".join(lines))
+
+
+@command("permissions", "what is gated, and what you have allowed", "perms")
+async def _permissions(args: str, session: "Session") -> CommandResult:
+    allow = session.allowlist
+    lines = [
+        f"  mode          {session.permission_mode}"
+        + ("   (every mutating operation is denied)"
+           if session.permission_mode == "plan" else ""),
+        f"  allowlist     {allow.path or '(not persisted)'}",
+        "",
+    ]
+    entries = sorted(getattr(allow, "entries", ()) or ())
+    if entries:
+        lines.append("  Approved in advance:")
+        lines.extend(f"      {e}" for e in entries)
+    else:
+        lines.append("  Nothing approved in advance.")
+    lines += [
+        "",
+        "  High-impact operations — force pushes, recursive deletes, piping a",
+        "  download into a shell — are always asked about and cannot be",
+        "  pre-approved here. Use shift+tab for plan mode to deny every",
+        "  mutation for a while.",
+    ]
+    return CommandResult("\n".join(lines))

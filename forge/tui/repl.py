@@ -104,6 +104,7 @@ async def _loop(session: Session, settings: ForgeSettings, extensions, verbose: 
     bar = InputBar(session.workspace, command_help(),
                    on_cycle_mode=lambda: _cycle_permission_mode(session),
                    on_toggle_expand=lambda: _expand_last(session))
+    session.input_bar = bar
     while True:
         # Above the prompt, not pinned to the last row: an inline renderer has
         # no dynamic region, and the numbers are read at exactly this moment

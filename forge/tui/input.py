@@ -226,6 +226,22 @@ class InputBar:
             mouse_support=False,              # keep native terminal selection
         )
 
+    # ── editing mode ─────────────────────────────────────────────────────────
+
+    @property
+    def vi_mode(self) -> bool:
+        if self._session is None:
+            return False
+        return self._session.editing_mode == EditingMode.VI
+
+    def set_vi_mode(self, on: bool) -> bool:
+        """Switch between emacs and vi key handling. Returns the mode in
+        effect, which is False when there is no line editor to configure."""
+        if self._session is None:
+            return False
+        self._session.editing_mode = EditingMode.VI if on else EditingMode.EMACS
+        return self.vi_mode
+
     # ── reading ──────────────────────────────────────────────────────────────
 
     async def read(self, prompt_ansi: str) -> Submission:
