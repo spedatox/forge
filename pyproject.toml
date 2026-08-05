@@ -22,8 +22,8 @@ providers = ["openai>=1.40"]
 # Windows implementation that behaves. Optional because `serve`, `connect`
 # and `demo` never read a key — only `forge chat` does, and it degrades to
 # plain input() when this is absent.
-tui = ["prompt_toolkit>=3.0"]
-dev = ["pytest>=8.0", "prompt_toolkit>=3.0"]
+tui = ["prompt_toolkit>=3.0", "rich>=13.0"]
+dev = ["pytest>=8.0", "prompt_toolkit>=3.0", "rich>=13.0"]
 
 [project.scripts]
 forge = "forge.__main__:main"

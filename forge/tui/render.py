@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from forge.tui import ansi
+from forge.tui import ansi, ui
 
 
 class StreamRenderer:
@@ -89,12 +89,11 @@ class StreamRenderer:
         args = data.get("input") or {}
         target = _summarize_args(args)
         ansi.write()
-        # `⏺ Read(calc.py)` — verb and object in one token, at the margin. The
-        # older `read_file  calc.py` said the same thing in more space and read
-        # as two separate facts.
-        ansi.write(ansi.paint("● ", "cyan")
-                   + ansi.paint(_label(name), "bold")
-                   + ansi.paint(f"({target})" if target else "", "grey"))
+        # `● Read(calc.py)` — verb and object in one token, at the margin.
+        rendered = ui.tool_call(_label(name), target)
+        ansi.write(rendered or (ansi.paint("● ", "cyan")
+                                + ansi.paint(_label(name), "bold")
+                                + ansi.paint(f"({target})" if target else "", "grey")))
         self._last_was_harness = True
 
     def _on_tool_result(self, data: Any) -> None:
@@ -139,6 +138,10 @@ class StreamRenderer:
         lines = display.splitlines()
         if not lines:
             return
+        rendered = ui.diff(prefix + lines[0], "\n".join(lines[1:]))
+        if rendered:
+            ansi.write(rendered)
+            return
         _write_gutter(prefix + lines[0])
         for line in lines[1:]:
             ansi.write(_INDENT + _paint_diff_line(line))
@@ -180,6 +183,10 @@ _INDENT = " " * 5
 
 def _write_gutter(text: str, failed: bool = False) -> None:
     """Write a result under its call, wrapped into the gutter."""
+    rendered = ui.tool_result(text, failed=failed)
+    if rendered:
+        ansi.write(rendered)
+        return
     lines = text.splitlines() or [""]
     style = "red" if failed else "grey"
     head = ansi.paint(GUTTER, "red" if failed else "dim")
@@ -310,6 +317,9 @@ def banner(agent: str, model: str, workspace: str, tools: int,
     started, which is exactly what an operator should not think before they
     have typed anything.
     """
+    framed = ui.welcome(agent, model, workspace, tools, _TIPS if tips else ())
+    if framed:
+        return "\n" + framed + "\n"
     width = max(46, min(ansi.terminal_width() - 2, 78))
     inner = width - 4
 
