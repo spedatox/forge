@@ -21,6 +21,70 @@ from forge.tui.input import (
 )
 
 
+# ── Driving the line editor without a terminal ──────────────────────────────
+# InputBar swallows construction failures by design (a terminal it cannot drive
+# must not end the session), so on a dev machine `_session` is None and every
+# key-binding test silently skips. That is how a broken assertion reached CI.
+# A pipe input plus DummyOutput gives prompt_toolkit something it will build
+# against anywhere, so these run on Windows, in Git Bash and on Linux CI alike.
+
+
+def _headless_bar(workspace: Path) -> InputBar:
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    with create_pipe_input() as pipe, create_app_session(
+        input=pipe, output=DummyOutput()
+    ):
+        bar = InputBar(workspace, command_help())
+    if bar._session is None:                       # noqa: SLF001
+        pytest.skip("prompt_toolkit would not build even headlessly")
+    return bar
+
+
+def _handler_for(workspace: Path, key_name: str):
+    """The bound handler for a key, found the way prompt_toolkit resolves it.
+
+    Looked up through KEY_ALIASES rather than by string-matching the key's
+    name: `backspace` is an alias for `c-h` and is stored as `Keys.ControlH`,
+    so searching names for "backspace" finds nothing.
+    """
+    from prompt_toolkit.keys import KEY_ALIASES, Keys
+
+    bar = _headless_bar(workspace)
+    target = Keys(KEY_ALIASES.get(key_name, key_name))
+    for binding in bar._session.key_bindings.bindings:   # noqa: SLF001
+        if len(binding.keys) == 1 and binding.keys[0] == target:
+            return binding.handler
+    raise AssertionError(f"{key_name} ({target}) is not bound")
+
+
+class _RecordingBuffer:
+    """Just enough Buffer for a delete handler to run against."""
+
+    def __init__(self) -> None:
+        self.deleted = 0
+        self.completion_started = False
+
+    def delete_before_cursor(self, count: int = 1) -> str:
+        self.deleted += count
+        return ""
+
+    def delete(self, count: int = 1) -> str:
+        self.deleted += count
+        return ""
+
+    def start_completion(self, select_first: bool = True) -> None:
+        self.completion_started = True
+
+
+class _FakeKeyEvent:
+    def __init__(self, buffer: _RecordingBuffer) -> None:
+        self.current_buffer = buffer
+        self.arg = 1
+
+
 # ── Mode classification ─────────────────────────────────────────────────────
 
 
@@ -345,25 +409,30 @@ def test_the_bar_accepts_a_hint_callable(tmp_path):
 
 
 @pytest.mark.skipif(not AVAILABLE, reason="prompt_toolkit not installed")
-def test_deleting_re_offers_completions(tmp_path):
+@pytest.mark.parametrize("key_name", ["backspace", "delete"])
+def test_deleting_re_offers_completions(tmp_path, key_name):
     """prompt_toolkit runs the completer on insert, but `delete_before_cursor`
     never touches it — so backspacing over a typo left the previous menu on
     screen, stale, describing text no longer there. Correcting a mistyped
-    command is exactly when the menu is wanted most."""
-    from prompt_toolkit.keys import Keys
+    command is exactly when the menu is wanted most.
 
-    bar = InputBar(tmp_path, command_help())
-    if bar._session is None:                       # noqa: SLF001
-        pytest.skip("no line editor in this terminal")
+    This asserts the handler actually asks for completions, rather than that a
+    binding exists under a particular name. The earlier version searched the
+    bound key names for "backspace" and could never have passed: prompt_toolkit
+    aliases `backspace` to `c-h` (KEY_ALIASES) and stores it as
+    `Keys.ControlH`, whose name contains no "backspace" at all. It went
+    unnoticed because it skipped on the dev machine — Git Bash has no console
+    prompt_toolkit can drive — and only ran, and failed, on CI.
+    """
+    handler = _handler_for(tmp_path, key_name)
+    buffer = _RecordingBuffer()
+    handler(_FakeKeyEvent(buffer))
 
-    bound = {
-        str(k)
-        for binding in bar._session.key_bindings.bindings   # noqa: SLF001
-        for k in binding.keys
-    }
-    assert any("backspace" in b.lower() for b in bound), \
-        "backspace is not rebound, so deleting will not refresh the menu"
-    assert any("delete" in b.lower() for b in bound)
+    assert buffer.completion_started, (
+        f"{key_name} does not refresh the menu, so correcting a typo leaves a "
+        "stale one on screen"
+    )
+    assert buffer.deleted, f"{key_name} no longer deletes anything"
 
 
 @pytest.mark.skipif(not AVAILABLE, reason="prompt_toolkit not installed")
