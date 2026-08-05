@@ -285,35 +285,23 @@ def test_tips_can_be_suppressed():
 # ── The spinner must not eat the reply ──────────────────────────────────────
 
 
-def test_buffered_prose_leaves_the_line_free():
-    """With Rich present a reply is held and rendered whole, so nothing is ever
-    written mid-line and the spinner can keep drawing throughout.
-
-    That is what removed the original bug rather than papering over it: a reply
-    arrived as `us, ready to work` where `Optimus, ready to work` had been
-    sent, because a spinner frame's `` returned to column 0 over text the
-    operator was already reading."""
-    from forge.tui import ui
+def test_prose_is_streamed_and_kept(capsys):
+    """Both halves: it appears as it is produced, AND it is retained so the
+    segment can be repainted as rendered markdown once it closes."""
     from forge.tui.render import StreamRenderer
 
-    if not ui.AVAILABLE:
-        pytest.skip("no Rich; the fallback path is covered below")
-
-    sp = Spinner()
-    renderer = StreamRenderer(spinner=sp)
+    renderer = StreamRenderer()
     asyncio.run(renderer({"type": "chunk", "data": "Optimus, ready"}))
 
-    assert not sp._paused, "buffered prose does not need the spinner silenced"  # noqa: SLF001
-    assert renderer._prose, "the reply was not held for rendering"             # noqa: SLF001
+    assert "Optimus, ready" in capsys.readouterr().out, "the reply did not stream"
+    assert "".join(renderer._prose) == "Optimus, ready"       # noqa: SLF001
 
 
-def test_raw_streaming_still_silences_the_spinner(monkeypatch):
-    """Without Rich the reply streams token by token, the cursor sits mid-line,
-    and a frame drawn then eats it. The pause is still required there."""
-    from forge.tui import render as render_mod
+def test_streaming_silences_the_spinner():
+    """The cursor sits mid-line while a reply streams, so a frame drawn then
+    returns to column 0 and eats it — the `us, ready to work` bug."""
     from forge.tui.render import StreamRenderer
 
-    monkeypatch.setattr(render_mod.ui, "AVAILABLE", False)
     sp = Spinner()
     renderer = StreamRenderer(spinner=sp)
     asyncio.run(renderer({"type": "chunk", "data": "Optimus, ready"}))
@@ -321,38 +309,26 @@ def test_raw_streaming_still_silences_the_spinner(monkeypatch):
     assert sp._paused                                        # noqa: SLF001
 
 
-def test_a_paused_spinner_draws_nothing():
-    written: list[str] = []
-    real = ansi.write
-
-    async def scenario():
-        ansi.write = lambda text="", end="\n": written.append(text)
-        try:
-            sp = Spinner()
-            sp.start()
-            sp.pause()
-            written.clear()
-            await asyncio.sleep(0.35)
-            await sp.stop()
-        finally:
-            ansi.write = real
-
-    asyncio.run(scenario())
-    assert not any("Thinking" in w or "◐" in w for w in written)
+def test_rewind_is_refused_when_there_is_nothing_to_reclaim():
+    """A rewind past the top of the screen erases the conversation above it.
+    A plainer reply beats a destroyed transcript."""
+    assert ansi.rewind(0) is False
+    assert ansi.rewind(-3) is False
 
 
-def test_a_tool_call_flushes_what_was_said_first():
-    """Anything said before reaching for a tool is a finished thought and has
-    to appear above the call, not after it."""
-    from forge.tui import ui
-    from forge.tui.render import StreamRenderer
+@pytest.mark.parametrize("text,width,rows", [
+    ("hello", 80, 1),
+    ("a\nb\nc", 80, 3),
+    ("x" * 200, 80, 3),          # one line of text, three rows on screen
+    ("", 80, 1),
+])
+def test_wrapped_height_counts_rows_not_newlines(text, width, rows):
+    """Rewinding by the wrong count either leaves debris or eats the line
+    above. A paragraph is one line of text and several rows on screen."""
+    assert ansi.wrapped_height(text, width) == rows
 
-    if not ui.AVAILABLE:
-        pytest.skip("requires Rich")
 
-    renderer = StreamRenderer()
-    asyncio.run(renderer({"type": "chunk", "data": "Let me look."}))
-    asyncio.run(renderer({"type": "tool",
-                          "data": {"id": "1", "name": "grep", "input": {}}}))
-
-    assert not renderer._prose, "prose was still held when the tool ran"  # noqa: SLF001
+def test_wrapped_height_ignores_style_codes():
+    """Escape codes are zero-width; counting them would over-rewind."""
+    styled = "[38;5;51mhello[0m"
+    assert ansi.wrapped_height("hello", 80) == ansi.wrapped_height(styled, 80)

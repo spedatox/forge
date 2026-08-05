@@ -35,7 +35,8 @@ class StreamRenderer:
         # printed on top of a half-drawn frame is unreadable.
         self.spinner = spinner
         self._wrote_text = False        # has model prose landed this turn?
-        self._prose: list[str] = []     # held until the segment closes
+        self._prose: list[str] = []     # streamed, and kept for repainting
+        self._streamed_rows = 0         # screen rows the raw text occupies
         self._last_was_harness = False  # was the last thing written a tool line?
         self._in_flight: set[str] = set()
         self._batch = 0                 # calls in the current parallel batch
@@ -60,17 +61,13 @@ class StreamRenderer:
         if self.spinner is not None:
             self.spinner.add_chars(len(text))
             self.spinner.set_status("Responding")
-        if ui.AVAILABLE:
-            # Held until the segment closes so it can be rendered as
-            # markdown. A heading or a fenced block cannot be laid out
-            # until it ends, and models write markdown whether or not
-            # anything renders it — unrendered, every asterisk is noise the
-            # reader strips by eye. Buffering also means nothing is ever
-            # written mid-line, so the spinner is free to keep drawing.
-            self._prose.append(text)
-            return
-        # Fallback path: prose goes out raw, token by token, so the cursor
-        # sits mid-line and a spinner frame drawn now would overwrite it.
+        # Streamed AND kept. It goes out token by token so the reply appears
+        # at the speed it is produced, and the same text is held so the
+        # segment can be repainted as rendered markdown once it closes —
+        # a heading or a fenced block cannot be laid out until it ends.
+        self._prose.append(text)
+        # The cursor now sits mid-line, so a spinner frame drawn here would
+        # overwrite text the operator is reading.
         if self.spinner is not None:
             self.spinner.pause()
         if not self._wrote_text:
@@ -80,22 +77,45 @@ class StreamRenderer:
             ansi.write()
         self._last_was_harness = False
         ansi.write(text, end="")
+        self._streamed_rows = ansi.wrapped_height("".join(self._prose))
 
     def _flush_prose(self) -> None:
-        """Render and print whatever the model has said since it last stopped."""
+        """Replace the streamed text with its rendered form.
+
+        The raw tokens are already on screen — that is what made the reply
+        appear as it was produced. This reclaims exactly the rows they
+        occupy and prints the formatted version over them.
+
+        Only when the whole segment is still on screen. Once it has
+        scrolled past the top there is nothing to rewind to, and moving the
+        cursor up anyway would erase the conversation above it. In that
+        case the raw text stays, which is a worse-looking reply and not a
+        destroyed transcript.
+        """
         if not self._prose:
             return
         body = "".join(self._prose)
         self._prose.clear()
+        streamed_rows = self._streamed_rows
+        self._streamed_rows = 0
+
         rendered = ui.markdown(body)
         if not rendered.strip():
             return
         if self.spinner is not None:
             self.spinner.clear()
-        ansi.write()
-        ansi.write(rendered)
+
+        reclaimable = streamed_rows and streamed_rows < ansi.terminal_height() - 2
+        if reclaimable and ansi.rewind(streamed_rows):
+            ansi.write(rendered)
+        else:
+            # Nothing reclaimed: the raw text stands and the rendered form
+            # would only repeat it.
+            ansi.write()
         self._wrote_text = True
         self._last_was_harness = False
+        if self.spinner is not None:
+            self.spinner.resume()
 
     def _on_done(self, data: Any) -> None:
         self._flush_prose()

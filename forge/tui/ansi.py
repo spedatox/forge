@@ -189,6 +189,48 @@ def clear_transient() -> None:
     write("\r\x1b[K", end="")
 
 
+def rewind(lines: int) -> bool:
+    """Move the cursor up `lines` rows and erase everything below it.
+
+    What lets a reply stream token by token AND end up rendered: the raw text
+    goes out as it arrives, then this reclaims the rows it occupied and the
+    formatted version is printed over them. `\\x1b[{n}A` moves up, `\\x1b[J`
+    erases from the cursor to the end of the screen.
+
+    False when it must not be attempted — no styling, or nothing to reclaim.
+    The caller then leaves the raw text where it is, which is correct: a
+    partial rewind would eat somebody's scrollback.
+    """
+    if not _ENABLED or lines <= 0:
+        return False
+    write(f"\r\x1b[{lines}A\x1b[J", end="")
+    return True
+
+
+def wrapped_height(text: str, width: int = 0) -> int:
+    """How many terminal rows `text` will occupy once the terminal wraps it.
+
+    Counting newlines is not enough — a long paragraph is one line of text and
+    several rows on screen, and rewinding by the wrong number either leaves
+    debris or eats the line above.
+    """
+    width = width or terminal_width()
+    if width <= 0:
+        return len(text.splitlines()) or 1
+    rows = 0
+    for line in text.split("\n"):
+        printable = visible_width(line)
+        rows += max(1, -(-printable // width))   # ceil division
+    return rows
+
+
+def terminal_height(default: int = 24) -> int:
+    try:
+        return os.get_terminal_size().lines
+    except OSError:
+        return default
+
+
 def rule(label: str = "", width: int = 0) -> str:
     """A horizontal divider, optionally labelled."""
     width = width or min(terminal_width(), 80)
