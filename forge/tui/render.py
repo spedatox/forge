@@ -79,6 +79,15 @@ class StreamRenderer:
             return
         content = str(data.get("content", ""))
         failed = bool(data.get("is_error"))
+
+        # An operator-facing rendering wins over the model-facing text: for an
+        # edit that is the difference between "Edited calc.py (1 replacement)"
+        # and seeing what actually landed in the file.
+        display = data.get("display")
+        if display and not failed:
+            self._write_display(str(display))
+            return
+
         marker = ansi.paint("    ✗ ", "red") if failed else ansi.paint("    ↳ ", "grey")
 
         if self.verbose:
@@ -91,6 +100,18 @@ class StreamRenderer:
         style = "red" if failed else "grey"
         for i, line in enumerate(body.splitlines() or [""]):
             ansi.write((marker if i == 0 else "      ") + ansi.paint(line, style))
+
+    def _write_display(self, display: str) -> None:
+        """A tool's operator-facing rendering — today, a diff.
+
+        Colour is applied here rather than in the tool, so the same text can go
+        to a socket, a log, or a terminal with no colour at all."""
+        lines = display.splitlines()
+        if not lines:
+            return
+        ansi.write(ansi.paint("    ↳ ", "grey") + ansi.paint(lines[0], "bold"))
+        for line in lines[1:]:
+            ansi.write("      " + _paint_diff_line(line))
 
     # ── Harness housekeeping the operator should still see ───────────────────
     def _on_compact(self, data: Any) -> None:
@@ -187,3 +208,18 @@ def banner(agent: str, model: str, workspace: str, tools: int) -> str:
         ansi.paint(f"    {tools} tools · /help for commands", "dim"),
         "",
     ])
+
+
+def _paint_diff_line(line: str) -> str:
+    """Green added, red removed, dim context — the whole reason a diff is
+    readable at a glance. Applied at the edge so `warden/diff.py` stays plain
+    text that any surface can render its own way."""
+    if line.startswith("@@"):
+        return ansi.paint(line, "cyan")
+    if line.startswith("+"):
+        return ansi.paint(line, "green")
+    if line.startswith("-"):
+        return ansi.paint(line, "red")
+    if line.startswith("…"):
+        return ansi.paint(line, "dim")
+    return ansi.paint(line, "grey")

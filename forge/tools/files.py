@@ -11,6 +11,7 @@ import hashlib
 from pydantic import BaseModel, Field
 
 from forge.warden.results import EXEMPT
+from forge.warden.diff import render_edit
 from forge.warden.tool import Tool, ToolContext, ToolResult
 
 
@@ -141,9 +142,19 @@ class WriteFile(Tool):
     CONCURRENCY_SAFE = False
 
     async def call(self, args: WriteFileArgs, ctx: ToolContext) -> ToolResult:
+        # Read first, purely so the operator gets a diff rather than a byte
+        # count. An overwrite of an existing file is the case where seeing what
+        # was lost matters most, and it is invisible after the write. A missing
+        # file is a creation, which diffs against nothing.
+        try:
+            previous = await ctx.cell.read(args.path)
+        except Exception:  # noqa: BLE001 — new file, unreadable, binary: all "no before"
+            previous = ""
+
         await ctx.cell.write(args.path, args.content)
         ctx.files.record(args.path, args.content, _hash(args.content))
-        return ToolResult(f"Wrote {len(args.content)} chars to {args.path}.")
+        return ToolResult(f"Wrote {len(args.content)} chars to {args.path}.",
+                          display=render_edit(args.path, previous, args.content))
 
 
 # ── edit_file ────────────────────────────────────────────────────────────────
@@ -190,4 +201,8 @@ class EditFile(Tool):
         updated = current.replace(args.old_string, args.new_string)
         await ctx.cell.write(args.path, updated)
         ctx.files.record(args.path, updated, _hash(updated))
-        return ToolResult(f"Edited {args.path} (1 replacement).")
+        # The model wrote this change and needs only "it applied"; the
+        # operator needs to see what landed. `display` carries the diff to
+        # them without it costing a place in the transcript.
+        return ToolResult(f"Edited {args.path} (1 replacement).",
+                          display=render_edit(args.path, current, updated))

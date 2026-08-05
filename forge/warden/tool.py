@@ -30,6 +30,20 @@ class ToolResult:
     every failure at every stage (§4) — the model reads it and adapts."""
     content: str
     is_error: bool = False
+    display: str | None = None
+    """An operator-facing rendering, never sent to the model.
+
+    The same split the safety flags above use: `content` is the model's, this is
+    the person's. It exists because the two audiences want opposite things from
+    an edit — the model wrote the change and needs only "it applied", while the
+    operator needs to SEE what landed in their file.
+
+    Putting a diff in `content` would pay for it in context on every subsequent
+    turn to tell the model something it already knows. Rendering it only in the
+    TUI would break the rule that the TUI sees exactly what Mark VI sees. So it
+    rides the tool_result event, where both surfaces can render it and neither
+    the transcript nor the token bill carries it.
+    """
 
 
 @dataclass

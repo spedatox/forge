@@ -209,7 +209,9 @@ class Warden:
             for tu, res in zip(turn.tool_uses, results):
                 await self.emit({"type": "tool_result",
                                  "data": {"tool_use_id": tu.id, "is_error": res.is_error,
-                                          "content": res.content}})
+                                          "content": res.content,
+                                          # Operator-facing only; see ToolResult.display.
+                                          "display": res.display}})
             state.messages.append({"role": "user", "content": result_blocks})
 
             # ── Boundary 2: interrupt checked after tools execute (§3). ───────
