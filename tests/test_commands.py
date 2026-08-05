@@ -327,3 +327,117 @@ def test_copy_ignores_a_trailing_tool_only_turn(tmp_path):
                                            "name": "x", "input": {}}]},
     ])
     assert _last_assistant_text(session) == "real answer"
+
+
+# ── Attribution, /commit and /review ────────────────────────────────────────
+
+
+def test_the_agent_identity_becomes_git_environment():
+    """Author AND committer. Setting only the author leaves the operator
+    recorded as committer of a patch they never saw."""
+    from forge.agents.config import GitIdentity
+
+    env = GitIdentity("Optimus Mark II", "optimus@example.com").env()
+    assert env["GIT_AUTHOR_NAME"] == "Optimus Mark II"
+    assert env["GIT_COMMITTER_NAME"] == "Optimus Mark II"
+    assert env["GIT_AUTHOR_EMAIL"] == env["GIT_COMMITTER_EMAIL"]
+
+
+def test_an_incomplete_identity_sets_nothing():
+    """Half an identity would leave git falling back to the operator for the
+    other half, which is worse than not touching it at all."""
+    from forge.agents.config import GitIdentity
+
+    assert GitIdentity("Optimus", "").env() == {}
+    assert GitIdentity("", "a@b.c").env() == {}
+    assert GitIdentity().env() == {}
+
+
+def test_both_shipped_agents_declare_an_identity():
+    from forge.agents.registry import AgentRegistry
+
+    registry = AgentRegistry.load()
+    for agent in ("optimus", "centurion"):
+        identity = registry.get(agent).git
+        assert identity.name and identity.email
+        assert identity.env()
+
+
+def test_the_identity_reaches_every_command_in_the_cell():
+    """Placed on the Cell rather than in a commit tool, so `run_command git
+    commit` — the route an agent actually takes — is attributed too."""
+    from forge.cell.base import CellPolicy
+    from forge.cell.subprocess_cell import SubprocessCell
+
+    policy = CellPolicy(env={"GIT_AUTHOR_NAME": "Optimus Mark II"})
+    cell = SubprocessCell(Path("."), policy)
+
+    assert cell._base_env(None)["GIT_AUTHOR_NAME"] == "Optimus Mark II"  # noqa: SLF001
+
+
+def test_a_per_call_env_still_wins_over_the_policy():
+    from forge.cell.base import CellPolicy
+    from forge.cell.subprocess_cell import SubprocessCell
+
+    cell = SubprocessCell(Path("."), CellPolicy(env={"X": "policy"}))
+    assert cell._base_env({"X": "call"})["X"] == "call"  # noqa: SLF001
+
+
+def test_commit_without_a_message_refuses_and_says_how(tmp_path):
+    cell = _Cell({"git status --porcelain": _Result(" M a.py\n")})
+    out = _run("commit", "", _Session(tmp_path, cell))
+
+    assert "needs a message" in out.text
+    assert not any("git commit" in c for c in cell.ran)
+
+
+def test_commit_with_nothing_staged_says_so(tmp_path):
+    out = _run("commit", "msg", _Session(tmp_path, _Cell()))
+    assert "Nothing to commit" in out.text
+
+
+def test_commit_stages_then_commits_and_names_the_author(tmp_path):
+    cell = _Cell({"git status --porcelain": _Result(" M a.py\n"),
+                  "git commit": _Result("[main abc123] msg\n"),
+                  "git log -1": _Result("Optimus Mark II\n")})
+    out = _run("commit", "fix the retry", _Session(tmp_path, cell))
+
+    assert any(c == "git add -A" for c in cell.ran)
+    assert any("git commit -m" in c for c in cell.ran)
+    assert "Optimus Mark II" in out.text
+
+
+def test_a_quote_in_the_message_cannot_break_the_command(tmp_path):
+    cell = _Cell({"git status --porcelain": _Result(" M a.py\n"),
+                  "git commit": _Result("[main abc] ok\n")})
+    _run("commit", "don't break; rm -rf /", _Session(tmp_path, cell))
+
+    commit = [c for c in cell.ran if c.startswith("git commit")][0]
+    assert "'\''" in commit          # the quote was escaped, not closed
+
+
+def test_review_asks_for_a_turn_rather_than_answering_itself(tmp_path):
+    """The review that never happens is the one where the operator has to write
+    the request."""
+    cell = _Cell({"git diff --stat": _Result(" a.py | 2 +-\n")})
+    out = _run("review", "", _Session(tmp_path, cell))
+
+    assert out.prompt, "no turn was requested"
+    assert "git diff HEAD" in out.prompt
+    assert "a.py" in out.text
+
+
+def test_review_passes_a_focus_through(tmp_path):
+    cell = _Cell({"git diff --stat": _Result(" a.py | 2 +-\n")})
+    out = _run("review", "the error handling", _Session(tmp_path, cell))
+    assert "the error handling" in out.prompt
+
+
+def test_review_of_a_clean_tree_starts_no_turn(tmp_path):
+    out = _run("review", "", _Session(tmp_path, _Cell()))
+    assert not out.prompt
+    assert "clean" in out.text
+
+
+def test_a_plain_command_requests_no_turn(tmp_path):
+    assert _run("cwd", "", _Session(tmp_path, _Cell())).prompt == ""

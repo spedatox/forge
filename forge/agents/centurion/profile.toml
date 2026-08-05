@@ -45,3 +45,8 @@ timeout_s     = 300
 image         = "forge-cell-centurion:latest"
 run_as_root   = true
 cap_add       = ["NET_RAW", "NET_ADMIN", "NET_BIND_SERVICE", "CHOWN", "DAC_OVERRIDE", "SETUID", "SETGID", "FOWNER"]
+
+# See optimus/profile.toml.
+[git]
+name = "Centurion Mark II"
+email = "centurion@spedatox.systems"

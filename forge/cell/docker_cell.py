@@ -161,7 +161,8 @@ class DockerCell(Cell):
             await self.start()
         t = self._clamp_timeout(timeout)
         exec_args = ["exec"]
-        for k, v in (env or {}).items():
+        merged = {**(self.policy.env or {}), **(env or {})}
+        for k, v in merged.items():
             exec_args += ["--env", f"{k}={v}"]
         if self._subpath:
             command = f"cd {shlex.quote(self._workdir)} && {command}"

@@ -86,6 +86,9 @@ async def run_job(
         default_timeout_s=c.timeout_s or cfg.cell.timeout_s,
         run_as_root=cfg.cell.run_as_root,
         cap_add=cfg.cell.cap_add,
+        # A dispatched job commits under the agent's name for the same reason an
+        # interactive one does — the history should record who wrote the code.
+        env=cfg.git.env(),
     )
 
     cell = None

@@ -50,3 +50,12 @@ cpus = 2.0
 memory_mb = 2048
 timeout_s = 120
 # backend = "docker"   # optional per-agent override of FORGE_CELL_BACKEND
+
+# Who git records for work this agent does. Committing under the operator's
+# name makes the history lie about who wrote the code, which costs most later —
+# when someone is working out why a change was made and asks the wrong person.
+# No account is required anywhere: git stores a name and an address, and a host
+# links it to a profile only if that address belongs to a registered account.
+[git]
+name = "Optimus Mark II"
+email = "optimus@spedatox.systems"

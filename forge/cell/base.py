@@ -3,7 +3,7 @@ governs every backend that implements it."""
 from __future__ import annotations
 
 import abc
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -32,6 +32,14 @@ class CellPolicy:
     # An OPERATOR (never a job) can relax this per agent in the profile, exactly
     # like allow_network — a security agent needs root to provision its own
     # toolchain (apt) and raw-socket caps to scan, so its Cell IS its lab.
+    env: dict = field(default_factory=dict)
+    """Environment applied to every command in this Cell.
+
+    Set from the agent's profile. Its first use is the git identity: putting
+    it here rather than in a dedicated commit tool means ANY route to a
+    commit is attributed correctly — including `run_command git commit`,
+    which is the one an agent actually reaches for."""
+
     run_as_root: bool = False          # uid 0 in the container (DockerCell --user 0:0)
     cap_add: tuple[str, ...] = ()      # caps whitelisted back after --cap-drop ALL
 

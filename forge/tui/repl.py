@@ -77,7 +77,9 @@ async def run_repl(agent: str = "optimus", workspace: Path | None = None,
                               cpus=cfg.cell.cpus, memory_mb=cfg.cell.memory_mb,
                               default_timeout_s=cfg.cell.timeout_s,
                               run_as_root=cfg.cell.run_as_root,
-                              cap_add=cfg.cell.cap_add),
+                              cap_add=cfg.cell.cap_add,
+                              # So a commit records who actually wrote it.
+                              env=cfg.git.env()),
             workspace=workspace)
 
         request = JobRequest(agent=cfg.agent_id, task="", repo_path=str(workspace))
@@ -119,8 +121,12 @@ async def _loop(session: Session, settings: ForgeSettings, extensions, verbose: 
             continue
 
         if entry.kind == "command":
-            if await _run_command(entry.text, session):
+            outcome = await _run_command(entry.text, session)
+            if outcome is True:
                 return 0
+            if isinstance(outcome, str) and outcome:
+                # A command asked for a turn (/review). Run it as if typed.
+                await _run_turn(outcome, session, settings, extensions, verbose)
         elif entry.kind == "bash":
             await _run_bash(entry.text, session)
         else:
@@ -189,8 +195,8 @@ def _cycle_permission_mode(session: Session) -> None:
     ansi.write(ansi.paint(f"\n  permission mode: {nxt}", "cyan"))
 
 
-async def _run_command(line: str, session: Session) -> bool:
-    """Returns True when the session should end."""
+async def _run_command(line: str, session: Session) -> "bool | str":
+    """True to end the session, a string to run as a turn, else False."""
     cmd, args = resolve_command(line)
     if cmd is None:
         ansi.write(ansi.paint(f"  unknown command: {line.split()[0]} — try /help", "yellow"))
@@ -204,7 +210,9 @@ async def _run_command(line: str, session: Session) -> bool:
         ansi.write(ansi.paint("  conversation cleared", "grey"))
     if result.compact:
         await _compact_now(session)
-    return result.quit
+    if result.quit:
+        return True
+    return result.prompt or False
 
 
 async def _compact_now(session: Session) -> None:

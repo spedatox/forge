@@ -28,6 +28,12 @@ class CommandResult:
     quit: bool = False
     clear: bool = False
     compact: bool = False
+    prompt: str = ""
+    """Run this as a normal turn after showing `text`.
+
+    Lets a command hand work to the model without knowing anything about the
+    loop — /review is a diff plus a request to read it, and writing that by
+    hand every time is exactly the friction that stops it happening."""
 
 
 @dataclass
@@ -486,3 +492,66 @@ async def _permissions(args: str, session: "Session") -> CommandResult:
         "  mutation for a while.",
     ]
     return CommandResult("\n".join(lines))
+
+
+# ── Committing and reviewing ─────────────────────────────────────────────────
+
+
+@command("commit", "stage everything and commit")
+async def _commit(args: str, session: "Session") -> CommandResult:
+    """Commits through the CELL, so the work is attributed to the agent that
+    did it — the Cell carries the agent's git identity (agents/config.py).
+    Running this on the host instead would record the operator as the author of
+    code they did not write."""
+    status, ok = await _cell_git(session, "git status --porcelain")
+    if not ok:
+        return CommandResult(f"  {status}")
+    if not status.strip():
+        return CommandResult("  Nothing to commit.")
+
+    message = args.strip()
+    if not message:
+        changed = len(status.splitlines())
+        return CommandResult(
+            f"  {changed} file(s) changed. A commit needs a message:\n"
+            "      /commit <what changed and why>\n\n"
+            "  Ask the agent to write one with /review first if you want a hand.")
+
+    staged, ok = await _cell_git(session, "git add -A")
+    if not ok:
+        return CommandResult(f"  Could not stage: {staged}")
+
+    # -- to stop a message beginning with a dash being read as a flag, and
+    # single quotes doubled so the shell keeps the message intact.
+    safe = message.replace("'", "'\''")
+    out, ok = await _cell_git(session, f"git commit -m '{safe}'")
+    if not ok:
+        return CommandResult(f"  Commit failed:\n  {out}")
+
+    who, _ = await _cell_git(session, "git log -1 --format=%an")
+    return CommandResult(f"  {out}\n  Authored by {who.strip() or 'unknown'}.")
+
+
+@command("review", "have the agent read its own uncommitted changes")
+async def _review(args: str, session: "Session") -> CommandResult:
+    """The one review that reliably does not happen is the one requiring the
+    operator to write the request. This assembles it: the diff is already on
+    disk, so the command supplies the ask and the agent reads what it wrote."""
+    stat, ok = await _cell_git(session, "git diff --stat HEAD")
+    if not ok:
+        return CommandResult(f"  {stat}")
+    if not stat.strip():
+        return CommandResult("  Nothing to review — the working tree is clean.")
+
+    focus = args.strip()
+    ask = (
+        "Review the uncommitted changes in this repository. Run "
+        "`git diff HEAD` to read them, then report: anything that looks wrong "
+        "or unfinished, anything that changes behaviour beyond what was asked, "
+        "and anything missing a test. Be specific — name files and lines. If it "
+        "looks correct, say so plainly rather than inventing concerns."
+    )
+    if focus:
+        ask += f"\n\nPay particular attention to: {focus}"
+    return CommandResult(
+        "\n".join(f"  {ln}" for ln in stat.splitlines()) + "\n", prompt=ask)

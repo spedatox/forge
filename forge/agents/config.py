@@ -27,6 +27,31 @@ class CellSpec:
 
 
 @dataclass(frozen=True)
+class GitIdentity:
+    """Who git records as the author of work this agent does.
+
+    An agent that commits under the operator's name makes the history lie
+    about who wrote the code — which matters most later, when someone is
+    trying to work out why a change was made and asks the wrong person.
+
+    No account anywhere is required: git only stores a name and an address.
+    A host like GitHub will show the name plainly and link it to a profile
+    only if the address belongs to a registered account, so an account buys
+    an avatar and a profile link and nothing else."""
+    name: str = ""
+    email: str = ""
+
+    def env(self) -> dict[str, str]:
+        """Author AND committer. Setting only the author leaves the operator
+        recorded as committer, which reads as them having applied a patch
+        they never saw."""
+        if not (self.name and self.email):
+            return {}
+        return {"GIT_AUTHOR_NAME": self.name, "GIT_AUTHOR_EMAIL": self.email,
+                "GIT_COMMITTER_NAME": self.name, "GIT_COMMITTER_EMAIL": self.email}
+
+
+@dataclass(frozen=True)
 class AgentConfig:
     agent_id: str                   # the discriminator; unique, stable (§2, mirrors Mark VI)
     name: str
@@ -37,3 +62,4 @@ class AgentConfig:
     permission_mode: str = "act"    # "act" | "plan" (§6)
     max_iterations: int = 30        # the single iteration ceiling (§3)
     cell: CellSpec = CellSpec()
+    git: GitIdentity = GitIdentity()

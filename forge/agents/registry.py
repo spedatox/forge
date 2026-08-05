@@ -11,7 +11,7 @@ from __future__ import annotations
 import tomllib
 from pathlib import Path
 
-from forge.agents.config import AgentConfig, CellSpec
+from forge.agents.config import AgentConfig, CellSpec, GitIdentity
 from forge.tools import ALL_TOOLS, CODING_TOOLS, SECURITY_TOOLS, WEB_TOOLS
 
 AGENTS_DIR = Path(__file__).parent
@@ -69,6 +69,7 @@ class AgentRegistry:
 def _load_one(profile_path: Path, prompt_path: Path) -> AgentConfig:
     data = tomllib.loads(profile_path.read_text(encoding="utf-8"))
     cell = data.get("cell", {})
+    git = data.get("git", {})
     agent_id = data["agent_id"]
     if agent_id != profile_path.parent.name:
         raise ValueError(
@@ -91,5 +92,9 @@ def _load_one(profile_path: Path, prompt_path: Path) -> AgentConfig:
             image=cell.get("image"),
             run_as_root=bool(cell.get("run_as_root", False)),
             cap_add=tuple(cell.get("cap_add", [])),
+        ),
+        git=GitIdentity(
+            name=git.get("name", data["name"]),
+            email=git.get("email", f"{agent_id}@forge.local"),
         ),
     )

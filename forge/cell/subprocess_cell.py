@@ -52,6 +52,7 @@ class SubprocessCell(Cell):
                         "HTTP_PROXY": "http://127.0.0.1:9",
                         "HTTPS_PROXY": "http://127.0.0.1:9",
                         "no_proxy": ""})
+        env.update(self.policy.env or {})
         if extra:
             env.update(extra)
         return env
