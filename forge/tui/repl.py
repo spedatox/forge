@@ -314,9 +314,13 @@ async def _drive(warden: Warden, session: Session, prompt: str):
 
 
 def _system_prompt(session: Session, extensions) -> str:
+    from forge.agents import conventions
     from forge.agents.prompt import PromptFragment, compose_system_prompt
+
+    repo = conventions.fragment(session.workspace)
     return compose_system_prompt([
         PromptFragment("profile", session.cfg.system_prompt),
+        *([repo] if repo else []),
         *extensions.fragments,
     ])
 

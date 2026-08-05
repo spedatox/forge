@@ -615,3 +615,52 @@ async def _resume(args: str, session: "Session") -> CommandResult:
         f"  Resumed: {picked.title}\n"
         f"  {picked.turns} turns, {len(messages)} messages, last touched {picked.age}.\n"
         "  Files may have changed since — the agent will re-read before editing.")
+
+
+# ── Project conventions ──────────────────────────────────────────────────────
+
+
+@command("init", "write an AGENTS.md so the agent knows this project's conventions")
+async def _init(args: str, session: "Session") -> CommandResult:
+    """Asks the agent to read the repository and write down its conventions.
+
+    Without one, an agent rediscovers a project by being corrected: wrong test
+    runner, wrong docstring style, a dependency the project deliberately
+    avoids. Each costs a turn to hit and another to fix, every session.
+
+    The agent writes it rather than a template, because a useful conventions
+    file is specific to what is actually in the repository, and a generic one
+    is worse than none — it occupies the same space on every turn while saying
+    nothing.
+    """
+    from forge.agents import conventions
+
+    existing = conventions.find(session.workspace)
+    if existing is not None and args.strip().lower() != "force":
+        rel = existing.relative_to(session.workspace)
+        return CommandResult(
+            f"  {rel} already exists and is loaded into every turn.\n"
+            "  Edit it directly, or /init force to have the agent rewrite it.")
+
+    target = conventions.FILENAMES[0]
+    return CommandResult(
+        f"  Asking the agent to survey this repository and write {target}.\n",
+        prompt=(
+            f"Write {target} for this repository: the conventions someone "
+            "working here has to know, which are not obvious from a single "
+            "file.\n\n"
+            "First look: the build and dependency files, the test setup, the "
+            "directory layout, and a few representative source files. Use "
+            "glob, grep and read_file — do not guess from the directory names.\n\n"
+            "Then write it, covering only what you actually verified:\n"
+            "- what this project is, in two sentences\n"
+            "- how to install, run and test it, with the real commands\n"
+            "- the layout, and where a new module of each kind belongs\n"
+            "- conventions visible in the code: naming, error handling, typing, "
+            "test style, anything the project does consistently and unusually\n"
+            "- anything deliberately avoided, where the code shows it\n\n"
+            "Be specific and short. This file is sent to the model on every "
+            "turn, so a sentence that does not change what an agent would do is "
+            "costing money to say nothing. Do not include a licence, a feature "
+            "list, or anything you could have written without reading the repo."
+        ))

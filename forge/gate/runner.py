@@ -12,6 +12,7 @@ import logging
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from forge.agents import conventions
 from forge.agents.config import AgentConfig
 from forge.agents.prompt import PromptFragment, compose_system_prompt
 from forge.agents.registry import AgentRegistry
@@ -141,8 +142,12 @@ async def run_job(
 
         # Seam 7: the profile's identity is itself a fragment, so nothing has to
         # be reshaped when a second contributor appears.
+        # A dispatched job works in the same repository an interactive one
+        # does, so it gets the same conventions.
+        repo_conventions = conventions.fragment(repo_path) if repo_path else None
         system_prompt = compose_system_prompt([
             PromptFragment("profile", cfg.system_prompt),
+            *([repo_conventions] if repo_conventions else []),
             *(fragments or []),
         ])
 

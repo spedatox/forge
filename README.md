@@ -25,6 +25,7 @@ forge chat
 - [Execution model](#execution-model)
 - [Sandboxing](#sandboxing)
 - [Permissions](#permissions)
+- [Project conventions](#project-conventions)
 - [Sessions](#sessions)
 - [Commit attribution](#commit-attribution)
 - [Context management](#context-management)
@@ -63,6 +64,7 @@ Capabilities:
 - Git worktree isolation, so edits land on a branch rather than in your working
   copy
 - A task list that survives context compaction
+- Project conventions from AGENTS.md loaded into every turn
 - Conversations saved per workspace and resumable after the terminal closes
 - Commits attributed to the agent that wrote the code
 - Codebase structure queries via a Graphify sidecar (optional)
@@ -179,6 +181,7 @@ The first character of a line determines how it is handled:
 | `/copy` | Last reply to the clipboard |
 | `/mcp` | MCP servers and their tools |
 | `/permissions` | What is gated and what you have allowed |
+| `/init` | Write an AGENTS.md describing this project's conventions |
 | `/exit` | End the session |
 
 ### Status line
@@ -308,6 +311,27 @@ configuration.
 At a prompt the operator can allow once, allow for the session, or deny.
 Session approvals are recorded and listed by `/approved`. If no operator is
 reachable, the request is denied.
+
+---
+
+## Project conventions
+
+If the workspace contains `AGENTS.md` — or `CLAUDE.md`, since many
+repositories already have one — it is loaded into the system prompt on
+every turn, labelled with its filename so the agent can tell a project's
+instructions from its own.
+
+Put the things someone working in the repository has to know and could not
+infer from a single file: the real build and test commands, where a new
+module of each kind belongs, conventions the code follows consistently, and
+anything the project deliberately avoids.
+
+`/init` has the agent survey the repository and write one. It refuses if a
+file already exists; `/init force` rewrites it.
+
+Keep it short. It is sent on every turn, so a sentence that would not change
+what an agent does is paying to say nothing. Files over 12,000 characters
+are truncated with a note.
 
 ---
 
@@ -515,7 +539,7 @@ tests/
 pytest -q
 ```
 
-469 tests. No network access or API key is required; provider calls and
+509 tests. No network access or API key is required; provider calls and
 sandboxes are substituted.
 
 ---
