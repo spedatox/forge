@@ -10,11 +10,17 @@ from forge.tools.shell import RunCommand
 from forge.tools.files import ReadFile, WriteFile, EditFile
 from forge.tools.graph import GraphQuery, GraphPath, GraphOverview
 from forge.tools.search import Grep, Glob
+from forge.tools.web import WebFetch, WebSearch
 
 # Navigation — how an agent orients in a repo it did not write. Shared by every
 # profile: the alternative is reading whole files, which fills the window before
 # the work starts.
 NAV_TOOLS = [ReadFile, Grep, Glob]
+
+# Research — what the repo cannot answer. Kept as its own group so a profile can
+# take navigation without taking the open internet; see web.py on why this is
+# independent of the Cell's allow_network posture.
+WEB_TOOLS = [WebSearch, WebFetch]
 
 # Reusable tool groups, referenced by agent configs via their allowlist (§2).
 CODING_TOOLS = [*NAV_TOOLS, WriteFile, EditFile, RunCommand,
@@ -28,9 +34,9 @@ SECURITY_TOOLS = [*NAV_TOOLS, RunCommand, WriteFile, EditFile]
 
 ALL_TOOLS = {cls.name: cls for cls in [
     RunCommand, ReadFile, WriteFile, EditFile, Grep, Glob,
-    GraphQuery, GraphPath, GraphOverview,
+    GraphQuery, GraphPath, GraphOverview, WebSearch, WebFetch,
 ]}
 
-__all__ = ["ALL_TOOLS", "NAV_TOOLS", "CODING_TOOLS", "SECURITY_TOOLS", "RunCommand",
-           "ReadFile", "WriteFile", "EditFile", "Grep", "Glob",
-           "GraphQuery", "GraphPath", "GraphOverview"]
+__all__ = ["ALL_TOOLS", "NAV_TOOLS", "CODING_TOOLS", "SECURITY_TOOLS", "WEB_TOOLS",
+           "RunCommand", "ReadFile", "WriteFile", "EditFile", "Grep", "Glob",
+           "GraphQuery", "GraphPath", "GraphOverview", "WebSearch", "WebFetch"]

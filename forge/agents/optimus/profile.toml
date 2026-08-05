@@ -15,7 +15,13 @@ model = "claude-sonnet-4-6"
 
 # Tool allowlist — Optimus is a coding agent. "coding" expands to the curated
 # file / shell / graph tool group. This list IS the security boundary (§2/§4).
-tools = ["coding"]
+#
+# "web" adds search and page-fetch. Debugging is the reason: without it the only
+# sources are this repo and whatever the model memorised, so an unfamiliar error
+# or a changed API signature has to be guessed at. These are harness-side
+# instruments and do not touch the Cell's network posture below — see
+# forge/tools/web.py.
+tools = ["coding", "web"]
 
 # One working mode with the safety gate always on; "plan" would make it
 # read-only for review (§6).

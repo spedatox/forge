@@ -12,7 +12,7 @@ import tomllib
 from pathlib import Path
 
 from forge.agents.config import AgentConfig, CellSpec
-from forge.tools import ALL_TOOLS, CODING_TOOLS, SECURITY_TOOLS
+from forge.tools import ALL_TOOLS, CODING_TOOLS, SECURITY_TOOLS, WEB_TOOLS
 
 AGENTS_DIR = Path(__file__).parent
 
@@ -20,6 +20,7 @@ AGENTS_DIR = Path(__file__).parent
 _TOOL_GROUPS = {
     "coding": tuple(cls.name for cls in CODING_TOOLS),
     "security": tuple(cls.name for cls in SECURITY_TOOLS),
+    "web": tuple(cls.name for cls in WEB_TOOLS),
 }
 
 
