@@ -22,8 +22,12 @@ from forge.tui import ansi
 class StreamRenderer:
     """Consumes JobEvents for one turn and writes the terminal view."""
 
-    def __init__(self, verbose: bool = False) -> None:
+    def __init__(self, verbose: bool = False, spinner: Any = None) -> None:
         self.verbose = verbose
+        # The live line, if one is running. Every write below clears it
+        # first: the spinner owns a row it redraws in place, and prose
+        # printed on top of a half-drawn frame is unreadable.
+        self.spinner = spinner
         self._wrote_text = False        # has model prose landed this turn?
         self._tool_names: dict[str, str] = {}
         self.saw_error = False          # so the turn summary does not repeat it
@@ -32,14 +36,20 @@ class StreamRenderer:
         kind = getattr(event, "type", None) or event.get("type")
         data = getattr(event, "data", None) if hasattr(event, "type") else event.get("data")
         handler = getattr(self, f"_on_{kind}", None)
-        if handler is not None:
-            handler(data)
+        if handler is None:
+            return
+        if self.spinner is not None:
+            self.spinner.clear()
+        handler(data)
 
     # ── The model's own output ───────────────────────────────────────────────
     def _on_chunk(self, data: Any) -> None:
         text = str(data or "")
         if not text:
             return
+        if self.spinner is not None:
+            self.spinner.add_chars(len(text))
+            self.spinner.set_status("Responding")
         if not self._wrote_text:
             ansi.write()
             self._wrote_text = True
@@ -57,6 +67,8 @@ class StreamRenderer:
             return
         name = str(data.get("name", "?"))
         self._tool_names[str(data.get("id"))] = name
+        if self.spinner is not None:
+            self.spinner.set_status(f"Running {name}")
         args = data.get("input") or {}
         ansi.write()
         ansi.write(ansi.paint("  ⏺ ", "cyan") + ansi.paint(name, "bold", "cyan")
@@ -85,6 +97,8 @@ class StreamRenderer:
         if not isinstance(data, dict):
             return
         stage = data.get("stage")
+        if self.spinner is not None:
+            self.spinner.set_status("Compacting")
         if stage == "elide":
             note = f"reclaimed {data.get('freed_chars', 0):,} chars of old tool output"
         elif stage == "summarize":

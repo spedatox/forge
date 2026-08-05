@@ -101,6 +101,15 @@ def _probe_unicode() -> bool:
         return False
 
 
+def unicode_ok() -> bool:
+    """Whether this terminal can encode the decorative glyphs.
+
+    Public because callers that build their OWN glyph sets — the spinner's
+    frames, say — need the same answer `glyphs()` uses, and reaching into a
+    module private to get it is how the two drift apart."""
+    return _UNICODE
+
+
 def glyphs(text: str) -> str:
     """Swap in ASCII fallbacks when the terminal cannot encode the originals."""
     if _UNICODE:
@@ -129,6 +138,34 @@ def write(text: str = "", end: str = "\n") -> None:
         encoding = getattr(sys.stdout, "encoding", None) or "ascii"
         sys.stdout.write(payload.encode(encoding, "replace").decode(encoding, "replace"))
         sys.stdout.flush()
+
+
+def transient(text: str) -> None:
+    """Draw a line that will be overwritten in place — no newline, no scrollback.
+
+    The whole basis of the live region. `\\r` returns to column 0 and `\\x1b[K`
+    erases to end of line, so the next draw replaces this one instead of stacking
+    up. Nothing written this way survives, which is exactly right for a spinner:
+    it is a view of *now*, and a terminal full of dead spinner frames is a
+    transcript nobody can read.
+
+    A no-op when styling is off — a dumb terminal or a redirected stdout gets
+    silence here rather than a screenful of escape codes in a log file.
+    """
+    if not _ENABLED:
+        return
+    write("\r\x1b[K" + text, end="")
+
+
+def clear_transient() -> None:
+    """Erase the live line so ordinary output can be written on top of it.
+
+    Every real write during a turn goes through here first. Without it the
+    spinner's half-line and the model's prose share a row and both become
+    unreadable."""
+    if not _ENABLED:
+        return
+    write("\r\x1b[K", end="")
 
 
 def rule(label: str = "", width: int = 0) -> str:

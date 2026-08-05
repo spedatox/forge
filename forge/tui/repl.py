@@ -33,6 +33,8 @@ from forge.tui.commands import command_help, resolve as resolve_command
 from forge.tui.render import StreamRenderer, banner, humanize_error
 from forge.tui.input import InputBar
 from forge.tui.session import Session
+from forge.tui.spinner import Spinner
+from forge.tui import status
 from forge.warden.compaction import (
     elide_old_tool_results,
     find_cut,
@@ -102,7 +104,12 @@ async def _loop(session: Session, settings: ForgeSettings, extensions, verbose: 
     bar = InputBar(session.workspace, command_help(),
                    on_cycle_mode=lambda: _cycle_permission_mode(session))
     while True:
-        entry = await bar.read(ansi.paint("\n› ", "cyan"))
+        # Above the prompt, not pinned to the last row: an inline renderer has
+        # no dynamic region, and the numbers are read at exactly this moment
+        # anyway — when deciding what to type next.
+        ansi.write()
+        status.write(session)
+        entry = await bar.read(ansi.paint("› ", "cyan"))
         if entry.is_eof:
             ansi.write()
             return 0
@@ -216,7 +223,8 @@ def _build_model(session: Session):
 async def _run_turn(prompt: str, session: Session, settings: ForgeSettings,
                     extensions, verbose: bool) -> None:
     signal = asyncio.Event()
-    renderer = StreamRenderer(verbose=verbose)
+    spinner = Spinner()
+    renderer = StreamRenderer(verbose=verbose, spinner=spinner)
     files = FileStateCache()
 
     ctx = ToolContext(
@@ -241,18 +249,24 @@ async def _run_turn(prompt: str, session: Session, settings: ForgeSettings,
     # Continue the conversation rather than starting one: seed the loop with
     # everything said so far, so turn nine remembers turn three.
     warden_task = asyncio.create_task(_drive(warden, session, prompt))
+    spinner.start()
     try:
         terminal = await asyncio.shield(warden_task)
     except KeyboardInterrupt:
         # Ask the loop to stop at its next boundary. It back-fills any pending
         # tool_results so the transcript stays well-formed, then returns ABORTED.
         signal.set()
+        spinner.set_status("Interrupting")
         ansi.write()
         ansi.write(ansi.paint("  ⏹ interrupting…", "yellow"))
         terminal = await warden_task
     except asyncio.CancelledError:
         signal.set()
         raise
+    finally:
+        # Always: an exception must not leave a spinner redrawing over the
+        # next prompt forever.
+        await spinner.stop()
 
     session.messages = list(terminal.messages)
     session.turns += 1
