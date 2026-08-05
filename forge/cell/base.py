@@ -59,6 +59,26 @@ class Cell(abc.ABC):
         correct answer, so a new backend is not required to have one."""
         return None
 
+    # ── The active working directory (worktree isolation) ────────────────────
+    # A path relative to the workspace root; empty means the workspace itself.
+    # When set, it is BOTH the directory commands run in AND the escape
+    # boundary read/write validate against — narrowing, never widening. That
+    # second half is what makes `enter_worktree` isolation rather than a
+    # convenience: inside a worktree the agent cannot write to the main
+    # checkout even by spelling out `../`.
+    _subpath: str = ""
+
+    @property
+    def subpath(self) -> str:
+        return self._subpath
+
+    def enter_subpath(self, rel: str) -> None:
+        """Narrow the working directory to `rel` beneath the workspace."""
+        self._subpath = rel.replace("\\", "/").strip("/")
+
+    def leave_subpath(self) -> None:
+        self._subpath = ""
+
     @abc.abstractmethod
     async def start(self) -> None:
         """Provision the sandbox (create container / workspace). Idempotent."""

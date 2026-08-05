@@ -12,6 +12,7 @@ from forge.tools.graph import GraphQuery, GraphPath, GraphOverview
 from forge.tools.search import Grep, Glob
 from forge.tools.todo import TodoWrite
 from forge.tools.web import WebFetch, WebSearch
+from forge.tools.worktree import EnterWorktree, ExitWorktree
 
 # Navigation — how an agent orients in a repo it did not write. Shared by every
 # profile: the alternative is reading whole files, which fills the window before
@@ -27,7 +28,8 @@ WEB_TOOLS = [WebSearch, WebFetch]
 # todo_write is in the coding group rather than its own: a plan is not an
 # optional capability for multi-step work, it is what keeps it coherent.
 CODING_TOOLS = [*NAV_TOOLS, WriteFile, EditFile, RunCommand,
-                GraphQuery, GraphPath, GraphOverview, TodoWrite]
+                GraphQuery, GraphPath, GraphOverview, TodoWrite,
+                EnterWorktree, ExitWorktree]
 
 # Centurion's group: run security tooling in the Cell (RunCommand) and read/write
 # scan output and engagement reports (files). No graph — its subject is a live
@@ -38,9 +40,10 @@ SECURITY_TOOLS = [*NAV_TOOLS, RunCommand, WriteFile, EditFile]
 ALL_TOOLS = {cls.name: cls for cls in [
     RunCommand, ReadFile, WriteFile, EditFile, Grep, Glob,
     GraphQuery, GraphPath, GraphOverview, WebSearch, WebFetch, TodoWrite,
+    EnterWorktree, ExitWorktree,
 ]}
 
 __all__ = ["ALL_TOOLS", "NAV_TOOLS", "CODING_TOOLS", "SECURITY_TOOLS", "WEB_TOOLS",
            "RunCommand", "ReadFile", "WriteFile", "EditFile", "Grep", "Glob",
            "GraphQuery", "GraphPath", "GraphOverview", "WebSearch", "WebFetch",
-           "TodoWrite"]
+           "TodoWrite", "EnterWorktree", "ExitWorktree"]

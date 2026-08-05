@@ -57,6 +57,8 @@ class DockerCell(Cell):
     def host_path(self) -> "Path | None":
         """The bind mount, when there is one. An ephemeral in-container
         workspace has no host path and search reports itself unavailable."""
+        if self.workspace_mount is not None and self._subpath:
+            return self.workspace_mount / self._subpath
         return self.workspace_mount
 
     async def _docker(self, *args: str, timeout: int | None = None,
@@ -161,6 +163,8 @@ class DockerCell(Cell):
         exec_args = ["exec"]
         for k, v in (env or {}).items():
             exec_args += ["--env", f"{k}={v}"]
+        if self._subpath:
+            command = f"cd {shlex.quote(self._workdir)} && {command}"
         exec_args += [self.container, "sh", "-c", command]
         # `docker exec` has no built-in timeout; wrap the whole exec in wait_for.
         code, out, err = await self._docker(*exec_args, timeout=t)
@@ -172,11 +176,19 @@ class DockerCell(Cell):
             timed_out,
         )
 
+    @property
+    def _workdir(self) -> str:
+        """The in-container working directory: /workspace, or the
+        subdirectory an active worktree narrowed it to."""
+        return f"{WORKDIR}/{self._subpath}" if self._subpath else WORKDIR
+
     def _guard(self, path: str) -> str:
-        # Resolve inside WORKDIR; refuse traversal outside it.
-        p = path if path.startswith("/") else f"{WORKDIR}/{path}"
+        # Resolve inside the ACTIVE workdir and refuse traversal outside it —
+        # inside a worktree the boundary tightens with it.
+        root = self._workdir
+        p = path if path.startswith("/") else f"{root}/{path}"
         norm = str(Path(p).as_posix())
-        if not (norm == WORKDIR or norm.startswith(WORKDIR + "/")):
+        if not (norm == root or norm.startswith(root + "/")):
             raise PermissionError(f"path escapes the Cell workspace: {path!r}")
         return norm
 

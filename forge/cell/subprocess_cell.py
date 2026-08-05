@@ -27,8 +27,14 @@ class SubprocessCell(Cell):
         self.policy = policy
 
     @property
+    def workdir(self) -> Path:
+        """Where commands run and paths resolve — the workspace, or the
+        subdirectory an active worktree narrowed it to."""
+        return (self.workspace / self._subpath) if self._subpath else self.workspace
+
+    @property
     def host_path(self) -> Path:
-        return self.workspace
+        return self.workdir
 
     async def start(self) -> None:
         self.workspace.mkdir(parents=True, exist_ok=True)
@@ -51,19 +57,22 @@ class SubprocessCell(Cell):
         return env
 
     def _resolve(self, path: str) -> Path:
-        target = (self.workspace / path).resolve() if not os.path.isabs(path) else Path(path).resolve()
-        if os.path.commonpath([str(target), str(self.workspace)]) != str(self.workspace):
+        # Validated against workdir, not workspace: inside a worktree the
+        # boundary tightens with it, so `../main-checkout/x` is refused.
+        root = self.workdir.resolve()
+        target = (root / path).resolve() if not os.path.isabs(path) else Path(path).resolve()
+        if os.path.commonpath([str(target), str(root)]) != str(root):
             raise PermissionError(f"path escapes the Cell workspace: {path!r}")
         return target
 
     async def run(self, command: str, timeout: int | None = None,
                   env: dict[str, str] | None = None) -> CommandResult:
         t = self._clamp_timeout(timeout)
-        self.workspace.mkdir(parents=True, exist_ok=True)
+        self.workdir.mkdir(parents=True, exist_ok=True)
         try:
             proc = await asyncio.create_subprocess_shell(
                 command,
-                cwd=str(self.workspace),
+                cwd=str(self.workdir),
                 env=self._base_env(env),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
