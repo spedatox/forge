@@ -51,6 +51,20 @@ BASH_PREFIX = "!"
 COMMAND_PREFIX = "/"
 MENTION_PREFIX = "@"
 
+# What a bare `/` offers first. Alphabetical order puts `agent, approved,
+# branch, clear, commit, compact` at the top of a six-item menu — none of
+# which is what anyone opens the menu to find. Once the operator types a
+# letter the filter takes over and this stops mattering.
+COMMON_COMMANDS = ("help", "resume", "diff", "status", "commit", "review",
+                   "compact", "clear", "cost", "exit")
+
+MAX_SUGGESTIONS = 6
+"""How many the menu offers at once.
+
+The reference caps its overlay at five. Past a handful the list stops
+being a menu and becomes a page: it covers the transcript, and choosing
+from it costs more than typing the name would have."""
+
 HISTORY_LIMIT = 2_000
 # Directories that are never worth offering as an @-mention. Walking them is
 # slow and every hit is noise.
@@ -109,6 +123,15 @@ def _walk_files(root: Path, limit: int = _MENTION_LIMIT) -> list[str]:
     return out
 
 
+def _menu_order(item: tuple[str, str]) -> tuple[int, str]:
+    """Commonly reached-for commands first, then alphabetical."""
+    name = item[0]
+    try:
+        return (COMMON_COMMANDS.index(name), "")
+    except ValueError:
+        return (len(COMMON_COMMANDS), name)
+
+
 if AVAILABLE:
 
     class ForgeCompleter(Completer):
@@ -137,10 +160,16 @@ if AVAILABLE:
 
             if text.startswith(COMMAND_PREFIX) and "\n" not in text:
                 word = text[1:].lower()
-                for name, help_text in sorted(self._commands.items()):
-                    if name.startswith(word):
-                        yield Completion(name, start_position=-len(word),
-                                         display=f"/{name}", display_meta=help_text)
+                shown = 0
+                for name, help_text in sorted(self._commands.items(),
+                                              key=_menu_order):
+                    if not name.startswith(word):
+                        continue
+                    yield Completion(name, start_position=-len(word),
+                                     display=f"/{name}", display_meta=help_text)
+                    shown += 1
+                    if shown >= MAX_SUGGESTIONS:
+                        return
                 return
 
             at = text.rfind(MENTION_PREFIX)
@@ -159,8 +188,24 @@ if AVAILABLE:
                     yield Completion(rel, start_position=-len(fragment),
                                      display=rel, display_meta="file")
                     shown += 1
-                    if shown >= 20:
+                    if shown >= MAX_SUGGESTIONS:
                         return
+
+
+_MENU_STYLE = None
+if AVAILABLE:
+    from prompt_toolkit.styles import Style as _PTStyle
+
+    # Greys, like everything else. The selected row is the only bright
+    # thing in the menu, which is what makes it findable at a glance.
+    _MENU_STYLE = _PTStyle.from_dict({
+        "completion-menu": "bg:#1c1c1c #b2b2b2",
+        "completion-menu.completion": "bg:#1c1c1c #b2b2b2",
+        "completion-menu.completion.current": "bg:#3a3a3a #ffffff bold",
+        "completion-menu.meta.completion": "bg:#1c1c1c #7f7f7f",
+        "completion-menu.meta.completion.current": "bg:#3a3a3a #d0d0d0",
+        "bottom-toolbar": "noreverse",
+    })
 
 
 class InputBar:
@@ -207,6 +252,21 @@ class InputBar:
             shift+enter is even distinguishable, so this is the portable one."""
             event.current_buffer.insert_text("\n")
 
+        # Deleting has to re-offer completions. prompt_toolkit runs the
+        # completer on insert but `delete_before_cursor` does not touch it,
+        # so backspacing over a typo left the previous menu on screen —
+        # stale, and describing text that is no longer there. Correcting a
+        # mistyped command is exactly when the menu is wanted most.
+        @bindings.add("backspace")
+        def _(event) -> None:
+            event.current_buffer.delete_before_cursor(count=event.arg)
+            event.current_buffer.start_completion(select_first=False)
+
+        @bindings.add("delete")
+        def _(event) -> None:
+            event.current_buffer.delete(count=event.arg)
+            event.current_buffer.start_completion(select_first=False)
+
         @bindings.add("s-tab")
         def _(event) -> None:
             if self._on_cycle_mode is not None:
@@ -237,13 +297,19 @@ class InputBar:
             key_bindings=bindings,
             editing_mode=EditingMode.EMACS,   # ctrl+r reverse search comes with it
             complete_while_typing=True,
-            complete_style=CompleteStyle.MULTI_COLUMN,
-            # prompt_toolkit reserves eight rows below the input for the
-            # completion menu, permanently — which put the hint bar in the
-            # middle of the window with a block of dead space above it.
-            # The menu is occasional and the gap is constant, so the gap
-            # goes; the menu expands the area when it actually opens.
-            reserve_space_for_menu=1,
+            # A single vertical list, the shape the reference uses: name,
+            # then its description dimmed beside it. A grid packs more in
+            # and gives each entry nowhere to explain itself, which is the
+            # whole reason to show a menu rather than expect recall.
+            complete_style=CompleteStyle.COLUMN,
+            style=_MENU_STYLE,
+            # Zero, not one. This pre-allocates rows so the display does not
+            # jump when a menu opens; at eight (the default) that is a
+            # permanent block of dead space, and at one the menu has room
+            # for a single entry and reads as broken. At zero nothing is
+            # reserved and the menu takes the space it needs when it opens,
+            # which costs a small shift and buys back both.
+            reserve_space_for_menu=0,
             # NOT enable_history_search. prompt_toolkit disables
             # complete_while_typing whenever it is on — its own source says
             # so — and that silently cost the menu that appears on `/` and

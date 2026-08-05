@@ -223,17 +223,52 @@ def test_completion_fires_while_typing(tmp_path):
 
 
 @pytest.mark.skipif(not AVAILABLE, reason="prompt_toolkit not installed")
-def test_a_bare_slash_offers_every_command(tmp_path):
-    """Typing `/` alone must list them — that is the discovery path."""
+def test_a_bare_slash_offers_the_useful_ones_first(tmp_path):
+    """The menu is capped, so what fills it matters.
+
+    Alphabetically the first six are `agent, approved, branch, clear, commit,
+    compact` — none of which is what anyone opens the menu to find. Past a
+    handful a menu stops being a menu and becomes a page that covers the
+    transcript."""
+    from prompt_toolkit.document import Document
+
+    from forge.tui.input import MAX_SUGGESTIONS, ForgeCompleter
+
+    completer = ForgeCompleter(command_help(), tmp_path)
+    offered = [c.text for c in completer.get_completions(Document("/"), None)]
+
+    assert len(offered) <= MAX_SUGGESTIONS
+    assert offered[0] == "help"
+    assert "resume" in offered
+    assert "agent" not in offered, "alphabetical order won over usefulness"
+
+
+@pytest.mark.skipif(not AVAILABLE, reason="prompt_toolkit not installed")
+def test_typing_a_letter_narrows_to_matches(tmp_path):
+    """Once there is a filter the ordering stops mattering — only matches."""
     from prompt_toolkit.document import Document
 
     from forge.tui.input import ForgeCompleter
 
     completer = ForgeCompleter(command_help(), tmp_path)
-    offered = [c.text for c in completer.get_completions(Document("/"), None)]
+    offered = [c.text for c in completer.get_completions(Document("/re"), None)]
 
-    assert len(offered) > 10
-    assert "help" in offered and "resume" in offered
+    assert set(offered) == {"resume", "review"}
+
+
+@pytest.mark.skipif(not AVAILABLE, reason="prompt_toolkit not installed")
+def test_file_suggestions_are_capped_too(tmp_path):
+    """A monorepo would otherwise bury the transcript under filenames."""
+    from prompt_toolkit.document import Document
+
+    from forge.tui.input import MAX_SUGGESTIONS, ForgeCompleter
+
+    for i in range(40):
+        (tmp_path / f"mod{i}.py").write_text("x", encoding="utf-8")
+    completer = ForgeCompleter({}, tmp_path)
+
+    offered = list(completer.get_completions(Document("see @mod"), None))
+    assert len(offered) <= MAX_SUGGESTIONS
 
 
 @pytest.mark.skipif(not AVAILABLE, reason="prompt_toolkit not installed")
@@ -307,3 +342,37 @@ def test_the_bar_accepts_a_hint_callable(tmp_path):
         pytest.skip("no line editor in this terminal")
 
     assert bar._session.bottom_toolbar is not None  # noqa: SLF001
+
+
+@pytest.mark.skipif(not AVAILABLE, reason="prompt_toolkit not installed")
+def test_deleting_re_offers_completions(tmp_path):
+    """prompt_toolkit runs the completer on insert, but `delete_before_cursor`
+    never touches it — so backspacing over a typo left the previous menu on
+    screen, stale, describing text no longer there. Correcting a mistyped
+    command is exactly when the menu is wanted most."""
+    from prompt_toolkit.keys import Keys
+
+    bar = InputBar(tmp_path, command_help())
+    if bar._session is None:                       # noqa: SLF001
+        pytest.skip("no line editor in this terminal")
+
+    bound = {
+        str(k)
+        for binding in bar._session.key_bindings.bindings   # noqa: SLF001
+        for k in binding.keys
+    }
+    assert any("backspace" in b.lower() for b in bound), \
+        "backspace is not rebound, so deleting will not refresh the menu"
+    assert any("delete" in b.lower() for b in bound)
+
+
+@pytest.mark.skipif(not AVAILABLE, reason="prompt_toolkit not installed")
+def test_no_rows_are_reserved_for_the_menu(tmp_path):
+    """Reserved rows are permanent dead space. At the default of eight the hint
+    bar sat in mid-screen; at one the menu had room for a single entry and read
+    as broken. Zero reserves nothing and lets the menu take what it needs."""
+    bar = InputBar(tmp_path, command_help())
+    if bar._session is None:                       # noqa: SLF001
+        pytest.skip("no line editor in this terminal")
+
+    assert bar._session.reserve_space_for_menu == 0   # noqa: SLF001
