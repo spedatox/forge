@@ -1,10 +1,27 @@
 name: CI Pipeline
 
+# Test on every branch; deploy only what has passed, and only from main.
+#
+# Before this existed, the peers on the server were whatever someone last
+# pulled by hand — on 2026-08-05 that was 26 commits behind main, including
+# worktree isolation, which is a safety fix. Green CI said nothing about what
+# was actually running, because nothing connected the two.
+#
+# Nothing about the server (host, user, path, port) lives in this file — it is
+# all in Actions Secrets, so a public repo never discloses the deployment.
+# Required repo secrets (Settings → Secrets and variables → Actions):
+#   SSH_HOST      server hostname or IP
+#   SSH_USER      deploy user
+#   SSH_KEY       that user's PRIVATE deploy key (public half in authorized_keys)
+#   SSH_PORT      SSH port (optional; defaults to 22)
+#   DEPLOY_PATH   absolute path of the clone on the server (/opt/forge-mk1)
+
 on:
   push:
     branches: [ "**" ]
   pull_request:
     branches: [ "**" ]
+  workflow_dispatch: {}
 
 env:
   FORGE_CELL_BACKEND: subprocess
@@ -39,3 +56,81 @@ jobs:
       - name: Run Forge Demo Verification
         run: |
           python -m forge demo
+
+  deploy:
+    name: Deploy to the execution host
+    needs: test                       # never deploy a red build
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    # A newer push supersedes an in-flight deploy; two of these must never
+    # interleave a git reset with a systemctl restart.
+    concurrency:
+      group: deploy-forge
+      cancel-in-progress: true
+
+    steps:
+      # Fail with the reason rather than a connection error nobody can read.
+      # Deliberately NOT a graceful skip: a deploy that quietly does nothing is
+      # the exact failure this pipeline exists to end.
+      - name: Check deploy secrets are configured
+        run: |
+          missing=""
+          [ -n "${{ secrets.SSH_HOST }}" ]   || missing="$missing SSH_HOST"
+          [ -n "${{ secrets.SSH_USER }}" ]   || missing="$missing SSH_USER"
+          [ -n "${{ secrets.SSH_KEY }}" ]    || missing="$missing SSH_KEY"
+          [ -n "${{ secrets.DEPLOY_PATH }}" ] || missing="$missing DEPLOY_PATH"
+          if [ -n "$missing" ]; then
+            echo "::error::Missing repo secrets:$missing — add them under"
+            echo "::error::Settings → Secrets and variables → Actions."
+            exit 1
+          fi
+
+      - name: SSH deploy
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          port: ${{ secrets.SSH_PORT }}
+          command_timeout: 15m
+          script: |
+            set -euo pipefail
+            cd "${{ secrets.DEPLOY_PATH }}"
+
+            # Mirror main exactly. .env and .env.<agent> are gitignored and so
+            # survive; the venv lives in .venv and is likewise untracked.
+            git fetch --prune origin main
+            git reset --hard origin/main
+
+            # forge is installed editable, so code is live after the reset —
+            # but a new dependency in pyproject.toml would not be. Cheap when
+            # nothing has changed.
+            .venv/bin/python -m pip install -q -e ".[providers]"
+
+            # The unit file is version-controlled. Sync it only when it
+            # actually differs, so an unchanged deploy does not daemon-reload.
+            if ! cmp -s deploy/forge@.service /etc/systemd/system/forge@.service; then
+              echo "unit file changed — installing"
+              cp deploy/forge@.service /etc/systemd/system/forge@.service
+              systemctl daemon-reload
+            fi
+
+            # Restarting drops whatever a peer was mid-way through. That is the
+            # accepted cost of staying current; the alternative is drifting 26
+            # commits behind again. Peers reconnect to Igor with capped backoff.
+            systemctl restart forge@optimus forge@centurion
+
+            # Restart=always would happily mask a crash loop, so give it long
+            # enough to fall over (RestartSec=5s) and then insist it is up.
+            sleep 12
+            for unit in forge@optimus forge@centurion; do
+              if ! systemctl is-active --quiet "$unit"; then
+                echo "::error::$unit is not active after deploy"
+                systemctl status "$unit" --no-pager -l | tail -30
+                exit 1
+              fi
+            done
+
+            echo "deployed $(git log -1 --format='%h %s')"
