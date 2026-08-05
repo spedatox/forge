@@ -301,12 +301,32 @@ class Warden:
                 self._forget_files()
             return bool(freed)
 
-        state.messages = rebuild(state.messages, cut, summary)
+        state.messages = rebuild(state.messages, cut, self._carry_plan(summary))
         state.compact_failures = 0
         self._forget_files()
         await self.emit({"type": "compact",
                          "data": {"stage": "done", "messages": len(state.messages)}})
         return True
+
+    def _carry_plan(self, summary: str) -> str:
+        """Re-state the plan into the summary, which compaction is keeping.
+
+        The plan lives harness-side (warden/todos.py) but the model only reads
+        the transcript, and the turns where it wrote the list are exactly what
+        just got replaced. Without this the agent comes out of a compaction
+        having forgotten which of its own steps are still outstanding — and the
+        long jobs that need compaction are precisely the ones with a plan worth
+        keeping. Appended to the summary rather than added as a message because
+        `rebuild` merges task and summary into one, and a separate message would
+        break the strict alternation it exists to preserve."""
+        todos = getattr(self.ctx, "todos", None)
+        if not todos:
+            return summary
+        return (
+            f"{summary}\n\n{todos.render('PLAN CARRIED THROUGH COMPACTION')}\n"
+            "The completed steps above are done — the work is on disk. Continue "
+            "from the first unfinished item."
+        )
 
     def _forget_files(self) -> None:
         """Drop read-before-write grounding after any reclamation.

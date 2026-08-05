@@ -30,6 +30,7 @@ from forge.warden.toolsource import (
     fold_providers,
 )
 from forge.warden.filestate import FileStateCache
+from forge.warden.todos import TodoList
 from forge.warden.ledger import TokenLedger
 from forge.warden.permissions import AllowList, Mode, PermissionEngine
 from forge.warden.state import StopReason, Terminal
@@ -125,6 +126,7 @@ async def run_job(
             cell=cell,
             graph=graph,
             files=FileStateCache(),
+            todos=TodoList(),
             permissions=PermissionEngine(
                 mode=Mode(cfg.permission_mode),
                 allowlist=allowlist or AllowList(),

@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from forge.graph.sidecar import GraphSidecar
     from forge.warden.permissions import Decision, PermissionEngine
     from forge.warden.filestate import FileStateCache
+    from forge.warden.todos import TodoList
 
 
 @dataclass
@@ -40,6 +41,9 @@ class ToolContext:
     files: "FileStateCache"
     permissions: "PermissionEngine"
     network_allowed: bool
+    todos: "TodoList | None" = None
+    """The run's plan. Optional so an embedder that never wired one still
+    constructs a context; todo_write reports its absence rather than raising."""
     oracle: "Any | None" = None
     """Seam 2: who answers a gated action. None means nobody is reachable, which
     resolves to deny — the failure direction is fixed."""
