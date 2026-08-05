@@ -102,7 +102,8 @@ async def run_repl(agent: str = "optimus", workspace: Path | None = None,
 
 async def _loop(session: Session, settings: ForgeSettings, extensions, verbose: bool) -> int:
     bar = InputBar(session.workspace, command_help(),
-                   on_cycle_mode=lambda: _cycle_permission_mode(session))
+                   on_cycle_mode=lambda: _cycle_permission_mode(session),
+                   on_toggle_expand=lambda: _expand_last(session))
     while True:
         # Above the prompt, not pinned to the last row: an inline renderer has
         # no dynamic region, and the numbers are read at exactly this moment
@@ -154,6 +155,23 @@ async def _run_bash(command: str, session: Session) -> None:
             ansi.write(ansi.paint(f"  {line}", style) if style else f"  {line}")
     if result.exit_code != 0:
         ansi.write(ansi.paint(f"  exit {result.exit_code}", "yellow"))
+
+
+def _expand_last(session: Session) -> None:
+    """ctrl+o — put back what the one-line view cut.
+
+    An inline renderer cannot reach up and rewrite output that has already
+    scrolled, so "expand" means printing the last shortened result again, in
+    full. That is also when the operator actually wants it: they read the
+    truncated line, and only then decide they needed the rest."""
+    if not session.last_truncated:
+        ansi.write(ansi.paint("\n  nothing to expand", "dim"))
+        return
+    name, text = session.last_truncated
+    ansi.write()
+    ansi.write(ansi.paint(f"  ⏶ {name} — full output", "cyan"))
+    for line in text.splitlines() or [""]:
+        ansi.write("      " + ansi.paint(line, "grey"))
 
 
 def _cycle_permission_mode(session: Session) -> None:
@@ -224,7 +242,10 @@ async def _run_turn(prompt: str, session: Session, settings: ForgeSettings,
                     extensions, verbose: bool) -> None:
     signal = asyncio.Event()
     spinner = Spinner()
-    renderer = StreamRenderer(verbose=verbose, spinner=spinner)
+    renderer = StreamRenderer(
+        verbose=verbose, spinner=spinner,
+        on_truncated=lambda name, text: setattr(session, "last_truncated", (name, text)),
+    )
     files = FileStateCache()
 
     ctx = ToolContext(

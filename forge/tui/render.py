@@ -22,8 +22,14 @@ from forge.tui import ansi
 class StreamRenderer:
     """Consumes JobEvents for one turn and writes the terminal view."""
 
-    def __init__(self, verbose: bool = False, spinner: Any = None) -> None:
+    def __init__(self, verbose: bool = False, spinner: Any = None,
+                 on_truncated: Any = None) -> None:
         self.verbose = verbose
+        # Called with (tool, full_text) whenever a result was shortened, so
+        # ctrl+o can put back what the one-line view cut. An inline renderer
+        # cannot rewrite text that has already scrolled, so the honest
+        # version of "expand" is to print it again in full.
+        self.on_truncated = on_truncated
         # The live line, if one is running. Every write below clears it
         # first: the spinner owns a row it redraws in place, and prose
         # printed on top of a half-drawn frame is unreadable.
@@ -97,6 +103,9 @@ class StreamRenderer:
             # spill file; a terminal that dumps 40K of grep output buries the
             # conversation it is supposed to be showing.
             body = ansi.truncate(content, max(20, ansi.terminal_width() - 10))
+            if body != content and self.on_truncated is not None:
+                name = self._tool_names.get(str(data.get("tool_use_id")), "tool")
+                self.on_truncated(name, content)
         style = "red" if failed else "grey"
         for i, line in enumerate(body.splitlines() or [""]):
             ansi.write((marker if i == 0 else "      ") + ansi.paint(line, style))
@@ -199,15 +208,40 @@ def humanize_error(raw: str) -> str:
     return ansi.truncate(raw, 300)
 
 
-def banner(agent: str, model: str, workspace: str, tools: int) -> str:
-    return "\n".join([
+# Shown once, under the banner. Not a feature list — the three things a person
+# cannot guess and will otherwise never discover, because nothing in a bare
+# prompt hints that they exist. `/help` covers the rest.
+_TIPS = (
+    ("!cmd", "run a shell command directly — no model turn, no tokens"),
+    ("@file", "complete a path from this workspace"),
+    ("shift+tab", "switch between act and plan mode"),
+)
+
+
+def banner(agent: str, model: str, workspace: str, tools: int,
+           tips: bool = True) -> str:
+    """The opening frame: who is running, on what, where, and how to begin.
+
+    The tips are the part that earns its space. A prompt with a cursor in it
+    gives no indication that `!` or `@` mean anything, so without this they are
+    features nobody uses — and the first of them, running a command without
+    spending a turn, is the one that saves the most money.
+    """
+    lines = [
         "",
         ansi.paint("  ▲ FORGE", "bold", "cyan") + ansi.paint(f"  {agent}", "cyan"),
         ansi.paint(f"    {model}", "grey"),
         ansi.paint(f"    {workspace}", "grey"),
         ansi.paint(f"    {tools} tools · /help for commands", "dim"),
-        "",
-    ])
+    ]
+    if tips:
+        width = max(len(key) for key, _ in _TIPS)
+        lines.append("")
+        for key, what in _TIPS:
+            lines.append(ansi.paint(f"    {key:<{width}}  ", "cyan")
+                         + ansi.paint(what, "dim"))
+    lines.append("")
+    return "\n".join(lines)
 
 
 def _paint_diff_line(line: str) -> str:

@@ -80,6 +80,9 @@ class Session:
     oracle: TerminalOracle = field(default_factory=TerminalOracle)
     turns: int = 0
     _mode: str = ""
+    last_truncated: tuple[str, str] | None = None
+    """(tool, full result) for the most recent shortened output — what
+    ctrl+o puts back."""
 
     @property
     def permission_mode(self) -> str:

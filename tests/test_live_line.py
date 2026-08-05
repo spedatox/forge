@@ -218,3 +218,65 @@ def test_the_branch_is_cached_then_forgettable(tmp_path, monkeypatch):
     status.forget_branch(tmp_path)
     status.git_branch(tmp_path)
     assert calls["n"] == 2
+
+
+# ── ctrl+o: putting back what the one-line view cut ─────────────────────────
+
+
+def test_a_truncated_result_is_remembered_for_expansion():
+    """An inline renderer cannot rewrite scrolled output, so expansion means
+    printing the full text again — which requires having kept it."""
+    from forge.tui.render import StreamRenderer
+
+    kept: list[tuple[str, str]] = []
+    renderer = StreamRenderer(on_truncated=lambda name, text: kept.append((name, text)))
+    renderer._tool_names["t1"] = "grep"      # noqa: SLF001 — set by the tool event
+
+    long_output = "match line\n" * 400
+    renderer._on_tool_result({"tool_use_id": "t1", "content": long_output})  # noqa: SLF001
+
+    assert kept, "a truncated result was not offered for expansion"
+    assert kept[0][0] == "grep"
+    assert kept[0][1] == long_output          # the FULL text, not the shortened one
+
+
+def test_a_short_result_is_not_offered_for_expansion():
+    """Nothing was cut, so there is nothing to put back."""
+    from forge.tui.render import StreamRenderer
+
+    kept: list[tuple[str, str]] = []
+    renderer = StreamRenderer(on_truncated=lambda name, text: kept.append((name, text)))
+    renderer._on_tool_result({"tool_use_id": "t1", "content": "ok"})  # noqa: SLF001
+
+    assert kept == []
+
+
+def test_verbose_mode_has_nothing_to_expand():
+    """It already printed everything."""
+    from forge.tui.render import StreamRenderer
+
+    kept: list[tuple[str, str]] = []
+    renderer = StreamRenderer(verbose=True,
+                              on_truncated=lambda n, t: kept.append((n, t)))
+    renderer._on_tool_result({"tool_use_id": "t1", "content": "x" * 5000})  # noqa: SLF001
+
+    assert kept == []
+
+
+# ── The opening frame ───────────────────────────────────────────────────────
+
+
+def test_the_banner_teaches_the_undiscoverable_keys():
+    """A prompt with a cursor in it gives no hint that ! or @ mean anything."""
+    from forge.tui.render import banner
+
+    out = banner("Optimus (optimus)", "deepseek-v4-pro", "/repo", 14)
+
+    assert "!cmd" in out and "@file" in out and "shift+tab" in out
+    assert "no model turn" in out          # the one that saves money
+
+
+def test_tips_can_be_suppressed():
+    from forge.tui.render import banner
+
+    assert "!cmd" not in banner("a", "m", "/w", 1, tips=False)
