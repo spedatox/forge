@@ -123,6 +123,12 @@ async def _loop(session: Session, settings: ForgeSettings, extensions, verbose: 
             return 0
         if not entry.text:
             continue
+        # The line editor leaves the cursor at the end of what was typed, so a
+        # single newline only terminates that row and the answer begins
+        # immediately beneath the question. One blank line separates them, and
+        # that gap is what makes the transcript read as turns rather than as
+        # one continuous stream.
+        ansi.write()
 
         if entry.kind == "command":
             outcome = await _run_command(entry.text, session)

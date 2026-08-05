@@ -454,3 +454,15 @@ def test_the_turn_summary_does_not_repeat_an_error_the_stream_showed():
     assert r.saw_error is False
     asyncio.run(r({"type": "error", "data": "boom"}))
     assert r.saw_error is True
+
+
+def test_a_reply_starts_a_line_below_the_question():
+    """The line editor leaves the cursor at the end of what was typed, so a
+    single newline only terminates that row and the answer begins directly
+    beneath the question. The blank line is what makes a transcript read as
+    turns rather than as one continuous stream."""
+    out = _render([{"type": "chunk", "data": "Hi there."}])
+
+    # A leading blank line before any prose lands.
+    assert out.startswith("\n"), "the reply ran straight on from the prompt"
+    assert "Hi there." in out
