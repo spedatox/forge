@@ -106,13 +106,16 @@ async def run_repl(agent: str = "optimus", workspace: Path | None = None,
 async def _loop(session: Session, settings: ForgeSettings, extensions, verbose: bool) -> int:
     bar = InputBar(session.workspace, command_help(),
                    on_cycle_mode=lambda: _cycle_permission_mode(session),
-                   on_toggle_expand=lambda: _expand_last(session))
+                   on_toggle_expand=lambda: _expand_last(session),
+                   hint=lambda: _hint_line(session))
     session.input_bar = bar
     while True:
-        # Above the prompt, not pinned to the last row: an inline renderer has
-        # no dynamic region, and the numbers are read at exactly this moment
-        # anyway — when deciding what to type next.
+        # A rule, then the state, then the prompt. The rule closes the turn
+        # above it: without one, a reply and the next question run together
+        # and the transcript reads as a single stream rather than a
+        # conversation with turns in it.
         ansi.write()
+        ansi.write(ansi.paint("─" * min(ansi.terminal_width() - 1, 96), "dim"))
         status.write(session)
         entry = await bar.read(ansi.paint("› ", "cyan"))
         if entry.is_eof:
@@ -132,6 +135,19 @@ async def _loop(session: Session, settings: ForgeSettings, extensions, verbose: 
             await _run_bash(entry.text, session)
         else:
             await _run_turn(entry.text, session, settings, extensions, verbose)
+
+
+def _hint_line(session: Session) -> str:
+    """What sits under the input.
+
+    Only what changes with state or is otherwise undiscoverable. A static
+    row of every shortcut becomes furniture within a day; the mode belongs
+    here because it silently governs whether the next request can write
+    anything at all."""
+    bits = ["? /help", "!cmd shell", "@file path"]
+    mode = session.permission_mode
+    bits.append("shift+tab plan" if mode == "act" else "PLAN — edits denied")
+    return ansi.paint("  " + "   ".join(bits), "dim")
 
 
 async def _run_bash(command: str, session: Session) -> None:

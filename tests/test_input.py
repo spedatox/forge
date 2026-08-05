@@ -261,3 +261,49 @@ def test_each_command_completion_carries_its_summary(tmp_path):
     resume = [c for c in completer.get_completions(Document("/resume"), None)][0]
 
     assert resume.display_meta_text.strip()
+
+
+# ── The hint bar under the input ────────────────────────────────────────────
+
+
+def test_the_hint_names_the_keys_that_cannot_be_guessed():
+    """A bare cursor gives no indication that ! or @ mean anything."""
+    from forge.tui.repl import _hint_line
+
+    class _S:
+        permission_mode = "act"
+
+    line = _hint_line(_S())
+    assert "!cmd" in line and "@file" in line and "/help" in line
+
+
+def test_the_hint_changes_with_the_mode():
+    """Plan mode silently governs whether the next request can write anything,
+    which makes it the one piece of state worth carrying under the cursor."""
+    from forge.tui.repl import _hint_line
+
+    class _Act:
+        permission_mode = "act"
+
+    class _Plan:
+        permission_mode = "plan"
+
+    assert "shift+tab" in _hint_line(_Act())
+    assert "denied" in _hint_line(_Plan())
+
+
+@pytest.mark.skipif(not AVAILABLE, reason="prompt_toolkit not installed")
+def test_the_bar_accepts_a_hint_callable(tmp_path):
+    """Evaluated per keystroke, not captured once — the mode it reports can
+    change mid-session via shift+tab."""
+    calls = {"n": 0}
+
+    def _hint():
+        calls["n"] += 1
+        return "  hint"
+
+    bar = InputBar(tmp_path, command_help(), hint=_hint)
+    if bar._session is None:                      # noqa: SLF001
+        pytest.skip("no line editor in this terminal")
+
+    assert bar._session.bottom_toolbar is not None  # noqa: SLF001

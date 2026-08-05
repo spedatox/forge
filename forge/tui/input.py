@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from typing import Any
 from pathlib import Path
 
 try:  # optional — see module docstring
@@ -36,7 +37,7 @@ try:  # optional — see module docstring
     from prompt_toolkit.completion import Completer, Completion
     from prompt_toolkit.shortcuts import CompleteStyle
     from prompt_toolkit.enums import EditingMode
-    from prompt_toolkit.formatted_text import ANSI
+    from prompt_toolkit.formatted_text import ANSI, HTML
     from prompt_toolkit.history import FileHistory
     from prompt_toolkit.key_binding import KeyBindings
     from prompt_toolkit.patch_stdout import patch_stdout
@@ -166,8 +167,10 @@ class InputBar:
     """Reads one submission at a time. Owns nothing else."""
 
     def __init__(self, workspace: Path, commands: dict[str, str],
-                 on_cycle_mode=None, on_toggle_expand=None) -> None:
+                 on_cycle_mode=None, on_toggle_expand=None,
+                 hint: Any = None) -> None:
         self.workspace = workspace
+        self._hint = hint
         self._commands = commands
         self._on_cycle_mode = on_cycle_mode
         self._on_toggle_expand = on_toggle_expand
@@ -216,8 +219,20 @@ class InputBar:
                 self._on_toggle_expand()
                 event.app.invalidate()
 
+        def _toolbar():
+            """The line under the input.
+
+            Where the reference TUI puts its shortcut hints, and the reason
+            is the same: the keys that drive this are invisible from a bare
+            cursor, and a hint sitting under the place you are typing is
+            read without being looked for.
+            """
+            text = self._hint() if callable(self._hint) else self._hint
+            return ANSI(text) if text else None
+
         return PromptSession(
             history=history,
+            bottom_toolbar=_toolbar,
             completer=ForgeCompleter(self._commands, self.workspace),
             key_bindings=bindings,
             editing_mode=EditingMode.EMACS,   # ctrl+r reverse search comes with it

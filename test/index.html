@@ -289,12 +289,12 @@
         }
 
         // --- Physics constants ---
-        const GRAVITY = 0.45;
-        const MAX_SPEED = 16;
+        const GRAVITY = 0.55;
+        const MAX_SPEED = 18;
         const WEB_RANGE = 320;
         const WEB_MIN = 35;
-        const WEB_RETRACT_SPEED = 2.5;
-        const WEB_EXTEND_SPEED = 1.8;
+        const WEB_RETRACT_SPEED = 3.0;
+        const WEB_EXTEND_SPEED = 2.0;
 
         // --- Update ---
         function update() {
@@ -330,31 +330,36 @@
 
             if (spidey.swinging) {
                 // === CONSTRAINED PENDULUM PHYSICS ===
-                // Apply gravity to velocity
+                // Apply gravity
                 spidey.vy += GRAVITY;
 
                 // Move by velocity
                 spidey.x += spidey.vx;
                 spidey.y += spidey.vy;
 
-                // Constrain to web: project position back onto circle around anchor
+                // Constrain to web length (position correction only — let velocity evolve naturally)
                 let dx = spidey.x - spidey.anchorX;
                 let dy = spidey.y - spidey.anchorY;
                 let dist = Math.sqrt(dx * dx + dy * dy);
 
                 if (dist > 0.001) {
-                    // Normalize direction from anchor to spidey
                     const nx = dx / dist;
                     const ny = dy / dist;
 
-                    // Pull spidey back to web length
-                    spidey.x = spidey.anchorX + nx * spidey.webLength;
-                    spidey.y = spidey.anchorY + ny * spidey.webLength;
+                    // Only correct overshoot beyond web length (allow slack, not stretch)
+                    if (dist > spidey.webLength) {
+                        // Pull spidey back to web length
+                        spidey.x = spidey.anchorX + nx * spidey.webLength;
+                        spidey.y = spidey.anchorY + ny * spidey.webLength;
 
-                    // Remove the radial component of velocity (keep only tangential)
-                    const radialVel = spidey.vx * nx + spidey.vy * ny;
-                    spidey.vx -= radialVel * nx;
-                    spidey.vy -= radialVel * ny;
+                        // Cancel only the outward radial velocity (prevent further stretching)
+                        const radialVel = spidey.vx * nx + spidey.vy * ny;
+                        if (radialVel > 0) {
+                            spidey.vx -= radialVel * nx;
+                            spidey.vy -= radialVel * ny;
+                        }
+                    }
+                    // When inside the circle (slack), let gravity do its work — no correction
                 }
 
                 // --- Web retract/extend: mouse controls web length ---
@@ -379,9 +384,9 @@
                 spidey.x += spidey.vx;
                 spidey.y += spidey.vy;
 
-                // Gentle air drag
-                spidey.vx *= 0.998;
-                spidey.vy *= 0.998;
+                // Lighter air drag
+                spidey.vx *= 0.999;
+                spidey.vy *= 0.999;
             }
 
             // Speed cap
@@ -394,12 +399,13 @@
             // --- Boundaries ---
             if (spidey.y > H - spidey.radius) {
                 spidey.y = H - spidey.radius;
-                spidey.vy *= -0.5;
-                if (Math.abs(spidey.vy) < 1) spidey.vy = 0;
+                spidey.vy *= -0.6;
+                // Apply ground friction to horizontal speed
+                spidey.vx *= 0.85;
             }
             if (spidey.y < spidey.radius) {
                 spidey.y = spidey.radius;
-                spidey.vy *= -0.5;
+                spidey.vy *= -0.4;
             }
             if (spidey.x < spidey.radius) {
                 spidey.x = spidey.radius;
