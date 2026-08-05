@@ -285,22 +285,40 @@ def test_tips_can_be_suppressed():
 # ── The spinner must not eat the reply ──────────────────────────────────────
 
 
-def test_streaming_prose_silences_the_spinner():
-    """The bug this exists to stop: a reply beginning mid-word.
+def test_buffered_prose_leaves_the_line_free():
+    """With Rich present a reply is held and rendered whole, so nothing is ever
+    written mid-line and the spinner can keep drawing throughout.
 
-    Streamed text carries no newline until the turn ends, so the cursor sits
-    partway along a line the operator is reading. A spinner frame drawn then
-    returns to column 0 and overwrites what is already there — the visible
-    symptom was `us, ready to work` where `Optimus, ready to work` had been.
-    """
+    That is what removed the original bug rather than papering over it: a reply
+    arrived as `us, ready to work` where `Optimus, ready to work` had been
+    sent, because a spinner frame's `` returned to column 0 over text the
+    operator was already reading."""
+    from forge.tui import ui
     from forge.tui.render import StreamRenderer
+
+    if not ui.AVAILABLE:
+        pytest.skip("no Rich; the fallback path is covered below")
 
     sp = Spinner()
     renderer = StreamRenderer(spinner=sp)
-
     asyncio.run(renderer({"type": "chunk", "data": "Optimus, ready"}))
 
-    assert sp._paused, "the spinner kept drawing over streamed text"  # noqa: SLF001
+    assert not sp._paused, "buffered prose does not need the spinner silenced"  # noqa: SLF001
+    assert renderer._prose, "the reply was not held for rendering"             # noqa: SLF001
+
+
+def test_raw_streaming_still_silences_the_spinner(monkeypatch):
+    """Without Rich the reply streams token by token, the cursor sits mid-line,
+    and a frame drawn then eats it. The pause is still required there."""
+    from forge.tui import render as render_mod
+    from forge.tui.render import StreamRenderer
+
+    monkeypatch.setattr(render_mod.ui, "AVAILABLE", False)
+    sp = Spinner()
+    renderer = StreamRenderer(spinner=sp)
+    asyncio.run(renderer({"type": "chunk", "data": "Optimus, ready"}))
+
+    assert sp._paused                                        # noqa: SLF001
 
 
 def test_a_paused_spinner_draws_nothing():
@@ -323,16 +341,18 @@ def test_a_paused_spinner_draws_nothing():
     assert not any("Thinking" in w or "◐" in w for w in written)
 
 
-def test_a_tool_call_brings_it_back():
-    """The reply is over and work restarted, so the line is safe again."""
+def test_a_tool_call_flushes_what_was_said_first():
+    """Anything said before reaching for a tool is a finished thought and has
+    to appear above the call, not after it."""
+    from forge.tui import ui
     from forge.tui.render import StreamRenderer
 
-    sp = Spinner()
-    renderer = StreamRenderer(spinner=sp)
+    if not ui.AVAILABLE:
+        pytest.skip("requires Rich")
 
+    renderer = StreamRenderer()
     asyncio.run(renderer({"type": "chunk", "data": "Let me look."}))
-    assert sp._paused                                        # noqa: SLF001
-
     asyncio.run(renderer({"type": "tool",
                           "data": {"id": "1", "name": "grep", "input": {}}}))
-    assert not sp._paused                                    # noqa: SLF001
+
+    assert not renderer._prose, "prose was still held when the tool ran"  # noqa: SLF001

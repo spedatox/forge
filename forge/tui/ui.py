@@ -186,6 +186,44 @@ def welcome(agent: str, model: str, workspace: str, tools: int,
         (0, 0, 0, 1)))
 
 
+PROSE_WIDTH = 96
+"""Where the model's own text wraps.
+
+Not the terminal width. A line running the full span of a wide window is
+measurably harder to read — the eye loses its place on the return sweep — and
+the reference TUI wraps for the same reason rather than filling the screen.
+"""
+
+
+def markdown(text: str) -> str:
+    """The model's reply, rendered.
+
+    Models write markdown whether or not anything renders it, so a raw
+    transcript shows `- **The Forge** is` and the asterisks are noise the
+    reader has to strip mentally on every line. Rendering costs one thing —
+    the text can no longer appear token by token, because a heading or a fenced
+    block cannot be laid out until it closes — which is why the caller buffers
+    a reply and flushes it here when the segment ends.
+    """
+    c = console()
+    if c is None:
+        return ""
+    body = text.strip()
+    if not body:
+        return ""
+    try:
+        from rich.markdown import Markdown
+
+        rendered = Markdown(body, code_theme="ansi_dark",
+                            inline_code_theme="ansi_dark")
+    except Exception:  # noqa: BLE001 — malformed markdown must still be readable
+        return render(Padding(Text(body, style="forge.fg"), (0, 0, 0, 0)))
+    with c.capture() as captured:
+        c.print(rendered, width=min(c.width, PROSE_WIDTH))
+    return "\n".join(line.rstrip()
+                     for line in captured.get().rstrip("\n").split("\n"))
+
+
 def tool_call(label: str, target: str) -> str:
     """`● Read(calc.py)` — the verb and its object as one token."""
     c = console()

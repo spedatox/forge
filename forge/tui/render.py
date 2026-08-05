@@ -35,6 +35,7 @@ class StreamRenderer:
         # printed on top of a half-drawn frame is unreadable.
         self.spinner = spinner
         self._wrote_text = False        # has model prose landed this turn?
+        self._prose: list[str] = []     # held until the segment closes
         self._last_was_harness = False  # was the last thing written a tool line?
         self._in_flight: set[str] = set()
         self._batch = 0                 # calls in the current parallel batch
@@ -57,31 +58,57 @@ class StreamRenderer:
         if not text:
             return
         if self.spinner is not None:
-            # Silence it for the rest of this reply. A frame drawn while
-            # prose is mid-line eats the text already on that line.
-            self.spinner.pause()
             self.spinner.add_chars(len(text))
+            self.spinner.set_status("Responding")
+        if ui.AVAILABLE:
+            # Held until the segment closes so it can be rendered as
+            # markdown. A heading or a fenced block cannot be laid out
+            # until it ends, and models write markdown whether or not
+            # anything renders it — unrendered, every asterisk is noise the
+            # reader strips by eye. Buffering also means nothing is ever
+            # written mid-line, so the spinner is free to keep drawing.
+            self._prose.append(text)
+            return
+        # Fallback path: prose goes out raw, token by token, so the cursor
+        # sits mid-line and a spinner frame drawn now would overwrite it.
+        if self.spinner is not None:
+            self.spinner.pause()
         if not self._wrote_text:
             ansi.write()
             self._wrote_text = True
         elif self._last_was_harness:
-            # Coming back from a tool block: without this the model's next
-            # sentence starts on the line under a gutter and the two read as
-            # one paragraph written by the same voice.
             ansi.write()
         self._last_was_harness = False
-        # No newline: deltas arrive mid-word and the point of streaming is that
-        # it appears at the speed it is produced.
         ansi.write(text, end="")
 
+    def _flush_prose(self) -> None:
+        """Render and print whatever the model has said since it last stopped."""
+        if not self._prose:
+            return
+        body = "".join(self._prose)
+        self._prose.clear()
+        rendered = ui.markdown(body)
+        if not rendered.strip():
+            return
+        if self.spinner is not None:
+            self.spinner.clear()
+        ansi.write()
+        ansi.write(rendered)
+        self._wrote_text = True
+        self._last_was_harness = False
+
     def _on_done(self, data: Any) -> None:
-        if self._wrote_text:
+        self._flush_prose()
+        if self._wrote_text and not ui.AVAILABLE:
             ansi.write()
 
     # ── What the harness did ─────────────────────────────────────────────────
     def _on_tool(self, data: Any) -> None:
         if not isinstance(data, dict):
             return
+        # Anything the model said before reaching for a tool is a finished
+        # thought; render it before the call appears under it.
+        self._flush_prose()
         name = str(data.get("name", "?"))
         self._tool_names[str(data.get("id"))] = name
         self._in_flight.add(str(data.get("id")))
