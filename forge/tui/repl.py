@@ -34,7 +34,7 @@ from forge.tui.render import StreamRenderer, banner, humanize_error
 from forge.tui.input import InputBar
 from forge.tui.session import Session
 from forge.tui.spinner import Spinner
-from forge.tui import status
+from forge.tui import persistence, status
 from forge.warden.compaction import (
     elide_old_tool_results,
     find_cut,
@@ -89,7 +89,8 @@ async def run_repl(agent: str = "optimus", workspace: Path | None = None,
             cfg=cfg, model_ref=model_ref, workspace=workspace, tools=tools, cell=cell,
             ledger=TokenLedger(context_limit=settings.context_limit,
                                max_output_tokens=settings.max_tokens),
-            allowlist=AllowList.load(settings.allowlist_path))
+            allowlist=AllowList.load(settings.allowlist_path),
+            session_id=persistence.new_id())
 
         ansi.write(banner(f"{cfg.name} ({cfg.agent_id})", model_ref, str(workspace), len(tools)))
         return await _loop(session, settings, extensions, verbose)
@@ -300,6 +301,7 @@ async def _run_turn(prompt: str, session: Session, settings: ForgeSettings,
 
     session.messages = list(terminal.messages)
     session.turns += 1
+    persistence.save(session, session.session_id)
     _report(terminal, session, verbose, already_shown=renderer.saw_error)
 
 

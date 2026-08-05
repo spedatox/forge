@@ -25,6 +25,8 @@ forge chat
 - [Execution model](#execution-model)
 - [Sandboxing](#sandboxing)
 - [Permissions](#permissions)
+- [Sessions](#sessions)
+- [Commit attribution](#commit-attribution)
 - [Context management](#context-management)
 - [Model providers](#model-providers)
 - [Agent configuration](#agent-configuration)
@@ -61,6 +63,8 @@ Capabilities:
 - Git worktree isolation, so edits land on a branch rather than in your working
   copy
 - A task list that survives context compaction
+- Conversations saved per workspace and resumable after the terminal closes
+- Commits attributed to the agent that wrote the code
 - Codebase structure queries via a Graphify sidecar (optional)
 - Model routing across six providers
 
@@ -167,6 +171,14 @@ The first character of a line determines how it is handled:
 | `/export [file]` | Write the conversation to a file |
 | `/keybindings` | Key reference |
 | `/cwd` | Current working directory |
+| `/commit <message>` | Stage everything and commit |
+| `/review [focus]` | Have the agent read its own uncommitted changes |
+| `/sessions` | Conversations that can be resumed here |
+| `/resume [n\|id]` | Continue an earlier conversation |
+| `/vim [on\|off]` | Vi keys in the input line |
+| `/copy` | Last reply to the clipboard |
+| `/mcp` | MCP servers and their tools |
+| `/permissions` | What is gated and what you have allowed |
 | `/exit` | End the session |
 
 ### Status line
@@ -296,6 +308,53 @@ configuration.
 At a prompt the operator can allow once, allow for the session, or deny.
 Session approvals are recorded and listed by `/approved`. If no operator is
 reachable, the request is denied.
+
+---
+
+## Sessions
+
+Each conversation is written to `.forge/sessions/` in the workspace after
+every completed turn, and can be picked up later:
+
+```
+/sessions          list what can be resumed here
+/resume 1          continue the most recent
+/resume 20260805-133421
+```
+
+A turn is the unit because it is the point at which the transcript is known
+to be replayable — mid-turn there can be a tool call with no result, which
+cannot be sent back to a provider.
+
+Resuming restores the conversation only. The sandbox, tools and permissions
+are rebuilt from the current profile, and file read-tracking starts empty,
+so the first edit after a resume re-reads the file. A conversation from last
+week describes files as they were.
+
+The 40 most recent sessions per workspace are kept.
+
+---
+
+## Commit attribution
+
+Work an agent does is committed under that agent's name, declared in its
+profile:
+
+```toml
+[git]
+name  = "Optimus Mark II"
+email = "optimus@spedatox.systems"
+```
+
+This is applied as environment on the sandbox, so it covers every route to a
+commit including `run_command git commit` — not only the `/commit` command.
+Author and committer are both set; setting only the author would record the
+operator as having applied a patch they never saw. The repository's own
+`user.name` is left alone.
+
+No account is required. Git stores a name and an address; a host such as
+GitHub links that to a profile only if the address belongs to a registered
+account.
 
 ---
 
@@ -456,7 +515,7 @@ tests/
 pytest -q
 ```
 
-447 tests. No network access or API key is required; provider calls and
+469 tests. No network access or API key is required; provider calls and
 sandboxes are substituted.
 
 ---

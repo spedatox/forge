@@ -82,6 +82,10 @@ class Session:
     _mode: str = ""
     last_truncated: tuple[str, str] | None = None
     input_bar: Any = None
+    session_id: str = ""
+    """Filename this conversation persists to. A resumed session keeps its
+    own id, so continuing it updates the same record rather than forking a
+    second one that diverges from the first."""
     """The live input line, so a command can change how it reads keys."""
     """(tool, full result) for the most recent shortened output — what
     ctrl+o puts back."""

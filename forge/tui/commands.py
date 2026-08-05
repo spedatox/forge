@@ -555,3 +555,63 @@ async def _review(args: str, session: "Session") -> CommandResult:
         ask += f"\n\nPay particular attention to: {focus}"
     return CommandResult(
         "\n".join(f"  {ln}" for ln in stat.splitlines()) + "\n", prompt=ask)
+
+
+# ── Picking a conversation back up ───────────────────────────────────────────
+
+
+@command("sessions", "conversations you can resume in this workspace", "ls")
+async def _sessions(args: str, session: "Session") -> CommandResult:
+    from forge.tui import persistence
+
+    entries = persistence.listing(session.workspace)
+    if not entries:
+        return CommandResult(
+            "  No saved conversations here yet. They are written after each\n"
+            "  turn, into .forge/sessions/.")
+    lines = []
+    for i, e in enumerate(entries, 1):
+        current = "  (this one)" if e.id == session.session_id else ""
+        lines.append(f"  {i:>2}. {e.title}")
+        lines.append(f"      {e.agent_id} · {e.turns} turns · {e.age} · {e.id}{current}")
+    lines.append("")
+    lines.append("  /resume <number|id> to pick one up.")
+    return CommandResult("\n".join(lines))
+
+
+@command("resume", "continue an earlier conversation")
+async def _resume(args: str, session: "Session") -> CommandResult:
+    """Replaces the live transcript with a stored one.
+
+    The Cell, the tools and the allowlist are NOT restored — they are rebuilt
+    from the current profile and the current workspace, which is the honest
+    thing to do: a conversation from last week describes files as they were,
+    and pretending otherwise would let the model edit against remembered text.
+    Read-tracking starts empty for the same reason, so the first edit after a
+    resume has to read the file again.
+    """
+    from forge.tui import persistence
+
+    entries = persistence.listing(session.workspace)
+    if not entries:
+        return CommandResult("  Nothing to resume in this workspace.")
+
+    picked = persistence.resolve(session.workspace, args)
+    if picked is None:
+        return CommandResult(
+            f"  No session matches {args.strip()!r}. Try /sessions for the list.")
+    if picked.id == session.session_id:
+        return CommandResult("  That is the conversation you are already in.")
+
+    messages = persistence.load(session.workspace, picked.id)
+    if messages is None:
+        return CommandResult(f"  Could not read session {picked.id}.")
+
+    session.messages = messages
+    session.session_id = picked.id
+    session.turns = picked.turns
+    session.last_truncated = None
+    return CommandResult(
+        f"  Resumed: {picked.title}\n"
+        f"  {picked.turns} turns, {len(messages)} messages, last touched {picked.age}.\n"
+        "  Files may have changed since — the agent will re-read before editing.")
