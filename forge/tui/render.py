@@ -317,7 +317,8 @@ def banner(agent: str, model: str, workspace: str, tools: int,
     started, which is exactly what an operator should not think before they
     have typed anything.
     """
-    framed = ui.welcome(agent, model, workspace, tools, _TIPS if tips else ())
+    framed = ui.welcome(agent, model, workspace, tools, _TIPS if tips else (),
+                        facts=_facts(workspace), resume=_resume(workspace))
     if framed:
         return "\n" + framed + "\n"
     width = max(46, min(ansi.terminal_width() - 2, 78))
@@ -362,3 +363,53 @@ def _paint_diff_line(line: str) -> str:
     if line.startswith("…"):
         return ansi.paint(line, "dim")
     return ansi.paint(line, "grey")
+
+
+def _facts(workspace: str) -> list[tuple[str, str]]:
+    """What the agent has loaded and what state the repository is in.
+
+    Everything here is known before the first prompt and invisible without
+    asking for it — which means the operator either checks by hand every time
+    or works without it. Failures are swallowed: a welcome screen that cannot
+    draw because git is missing is worse than one missing a line.
+    """
+    from pathlib import Path
+
+    out: list[tuple[str, str]] = []
+    root = Path(workspace)
+
+    try:
+        from forge.agents import conventions
+
+        found = conventions.find(root)
+        out.append(("context", found.name if found else "no AGENTS.md"))
+    except Exception:  # noqa: BLE001
+        pass
+
+    try:
+        from forge.tui import status as status_mod
+
+        branch = status_mod.git_branch(root)
+        if branch:
+            out.append(("branch", branch))
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+def _resume(workspace: str) -> list[tuple[str, str]]:
+    """The last few conversations, newest first.
+
+    The single most useful thing to know at a prompt in a repository worked in
+    before — and until now it required remembering that /sessions exists.
+    """
+    from pathlib import Path
+
+    try:
+        from forge.tui import persistence
+
+        entries = persistence.listing(Path(workspace), limit=3)
+    except Exception:  # noqa: BLE001
+        return []
+    return [(f"/resume {i}", f"{e.title}  ({e.age})")
+            for i, e in enumerate(entries, 1)]

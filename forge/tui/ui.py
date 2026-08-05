@@ -121,49 +121,69 @@ def render(renderable: Any) -> str:
 # ── Components ───────────────────────────────────────────────────────────────
 
 
+def _section(title: str, rows: list[tuple[str, str]]) -> Any:
+    """A titled two-column block: a key and what it is."""
+    grid = Table.grid(padding=(0, 2))
+    grid.add_column(style="forge.fg", no_wrap=True)
+    grid.add_column(style="forge.faint", overflow="ellipsis", no_wrap=True)
+    for key, what in rows:
+        grid.add_row(key, what)
+    return Group(Text(title, style="forge.accent"), grid)
+
+
 def welcome(agent: str, model: str, workspace: str, tools: int,
-            tips: tuple[tuple[str, str], ...]) -> str:
-    """The opening frame, or "" when Rich is unavailable."""
+            tips: tuple[tuple[str, str], ...],
+            facts: list[tuple[str, str]] | None = None,
+            resume: list[tuple[str, str]] | None = None) -> str:
+    """The opening frame, or "" when Rich is unavailable.
+
+    Two columns, and the right one carries INFORMATION rather than decoration.
+    An opening screen that only restates what was typed to launch it is empty
+    space the operator has to scroll past; the things actually worth knowing
+    before the first prompt are what can be picked back up, what state the
+    repository is in, and what the agent has loaded. All of it is already known
+    at this point and none of it is visible anywhere else without asking.
+    """
     c = console()
     if c is None:
         return ""
 
-    head = Table.grid(padding=(0, 1))
-    head.add_column()
-    head.add_row(Text("▲ FORGE", style="forge.accent"),
-                 Text(agent, style="forge.muted"))
-
-    body = Group(
-        head,
+    left: list[Any] = [
+        Group(Text("▲ FORGE", style="forge.accent"),
+              Text(agent, style="forge.muted")),
         Text(""),
-        Text(model, style="forge.faint"),
-        Text(workspace, style="forge.faint", overflow="ellipsis", no_wrap=True),
-    )
-    out = [render(Padding(Panel(body, border_style="forge.faint", box=ROUNDED,
-                                padding=(0, 1), width=min(c.width - 2, 78)),
-                          (0, 0, 0, 1)))]
+    ]
+    left.append(_section("Session", [("model", model), ("tools", str(tools))]
+                         + list(facts or [])))
+    left.append(Text(""))
+    left.append(Text(workspace, style="forge.faint",
+                     overflow="ellipsis", no_wrap=True))
 
+    right: list[Any] = []
+    if resume:
+        right.append(_section("Resume", resume))
+        right.append(Text(""))
     if tips:
-        grid = Table.grid(padding=(0, 2))
-        grid.add_column(style="forge.fg", no_wrap=True)
-        grid.add_column(style="forge.faint")
-        grid.add_column(style="forge.fg", no_wrap=True)
-        grid.add_column(style="forge.faint")
-        pairs = [tips[i:i + 2] for i in range(0, len(tips), 2)]
-        for pair in pairs:
-            cells: list[str] = []
-            for key, what in pair:
-                cells += [key, what]
-            while len(cells) < 4:
-                cells.append("")
-            grid.add_row(*cells)
-        out.append("")
-        out.append(render(Padding(grid, (0, 0, 0, 2))))
+        right.append(_section("Getting started", list(tips)))
 
-    out.append("")
-    out.append(render(Padding(Text(f"{tools} tools · /help for commands",
-                                   style="forge.faint"), (0, 0, 0, 2))))
-    return "\n".join(out)
+    # Explicit widths, not ratios. A grid with `expand` inside a fixed-width
+    # Panel has no idea what it is allowed to occupy and collapses every cell
+    # to an ellipsis — the columns have to be told.
+    outer = min(c.width - 2, 88)
+    inner = outer - 6                      # borders + horizontal padding
+    gap = 3
+    left_w = max(24, (inner - gap) * 4 // 9)
+    right_w = max(20, inner - gap - left_w)
+
+    columns = Table.grid(padding=(0, gap))
+    columns.add_column(width=left_w, overflow="ellipsis")
+    columns.add_column(width=right_w, overflow="ellipsis")
+    columns.add_row(Group(*left), Group(*right) if right else Text(""))
+
+    return render(Padding(
+        Panel(columns, border_style="forge.faint", box=ROUNDED,
+              padding=(1, 2), width=outer),
+        (0, 0, 0, 1)))
 
 
 def tool_call(label: str, target: str) -> str:

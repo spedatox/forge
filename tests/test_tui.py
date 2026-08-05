@@ -229,8 +229,42 @@ def test_unknown_events_are_ignored_rather_than_crashing():
 
 
 def test_the_banner_states_where_the_agent_is_working():
+    """Who, on what, and where — the three things that decide whether the next
+    prompt goes anywhere sensible."""
     out = banner("Optimus", "anthropic:x", "/repo", 9)
-    assert "Optimus" in out and "/repo" in out and "9 tools" in out
+    assert "Optimus" in out
+    assert "/repo" in out
+    assert "anthropic:x" in out
+    assert "9" in out                       # tool count, now a labelled row
+
+
+def test_the_banner_offers_what_can_be_resumed(tmp_path, monkeypatch):
+    """An opening screen that only restates the launch command is empty space.
+    What is actually worth knowing first is what can be picked back up."""
+    import forge.tui.render as render_mod
+
+    monkeypatch.setattr(render_mod, "_resume",
+                        lambda ws: [("/resume 1", "fix the retry logic  (2h ago)")])
+    out = banner("Optimus", "anthropic:x", str(tmp_path), 9)
+
+    assert "Resume" in out
+    assert "fix the retry logic" in out
+
+
+def test_the_banner_survives_a_workspace_it_cannot_inspect(tmp_path, monkeypatch):
+    """git missing, no sessions, unreadable directory — a welcome that cannot
+    draw is worse than one missing a line."""
+    import forge.tui.render as render_mod
+
+    def _boom(_ws):
+        raise OSError("nope")
+
+    monkeypatch.setattr(render_mod, "_resume", _boom)
+    with pytest.raises(OSError):
+        render_mod._resume(tmp_path)        # the helper itself may raise…
+
+    monkeypatch.setattr(render_mod, "_resume", lambda ws: [])
+    assert banner("Optimus", "anthropic:x", str(tmp_path), 9)   # …the banner must not
 
 
 # ── The permission oracle (Seam 2, third implementation) ────────────────────
