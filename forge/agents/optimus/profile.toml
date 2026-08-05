@@ -9,9 +9,22 @@ name = "Optimus"
 domain = "systems, code & infrastructure"
 
 # Model IDs live only in profiles (Rule 10, mirrored from Mark VI). The Warden
-# never hardcodes one. This is the real model used when an ANTHROPIC_API_KEY is
-# present; the offline demo overrides it with the deterministic ScriptedModel.
-model = "claude-sonnet-4-6"
+# never hardcodes one; the offline demo overrides it with the deterministic
+# ScriptedModel.
+#
+# DeepSeek rather than Anthropic: this peer is meant to run continuously, and
+# metered Anthropic spend is the cost this whole system exists to avoid. Mark
+# VI's own agents are pinned to the same model, so there is one provider to
+# reason about and one key that matters.
+#
+# Known weakness, and the reason the harness matters more than the model here:
+# non-Anthropic providers do not enforce a tool schema's `required`, and this
+# one will claim work it did not do. The Warden is what makes that survivable —
+# every failure returns is_error the model must read, and edit_file's
+# content-hash freshness means it cannot edit a file it has not actually seen.
+# If reported-but-not-done work starts showing up, that is the signal to
+# revisit this line, not the prompt.
+model = "deepseek:deepseek-v4-pro"
 
 # Tool allowlist — Optimus is a coding agent. "coding" expands to the curated
 # file / shell / graph tool group. This list IS the security boundary (§2/§4).

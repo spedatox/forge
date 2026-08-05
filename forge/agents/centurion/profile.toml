@@ -7,8 +7,10 @@ agent_id = "centurion"
 name = "Centurion"
 domain = "cyber security"
 
-# Model IDs live only in profiles (Rule 10). Same reasoning tier as Optimus.
-model = "claude-sonnet-4-6"
+# Model IDs live only in profiles (Rule 10). Same reasoning tier as Optimus —
+# and the same provider, so the two peers share one key and one failure mode
+# rather than two. See optimus/profile.toml for why it is not Anthropic.
+model = "deepseek:deepseek-v4-pro"
 
 # Tool allowlist — the "security" group: run security tooling in the Cell +
 # read/write scan output and reports. This list IS the security boundary (§2/§4).
