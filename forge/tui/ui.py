@@ -56,6 +56,10 @@ PALETTE = {
     "removed": "red",
     "failed": "red",
     "warn": "yellow",
+    # The band behind the operator's own message. Dark enough to read as a
+    # surface rather than a highlight, light enough to be visible on the
+    # near-black a terminal usually is.
+    "user_bg": "grey19",
 }
 
 _THEME = {
@@ -67,6 +71,7 @@ _THEME = {
     "forge.removed": PALETTE["removed"],
     "forge.failed": PALETTE["failed"],
     "forge.warn": PALETTE["warn"],
+    "forge.user": f"{PALETTE['accent']} on {PALETTE['user_bg']}",
 }
 
 _console: Any = None
@@ -88,9 +93,32 @@ def console() -> Any:
         # reasonable default and wrong here: ansi.enable() has already put
         # the console into virtual-terminal mode, and the substitution was
         # firing on terminals that render ╭ perfectly well.
+        # Colour follows ansi's decision rather than Rich's own detection.
+        # They answer the same question separately and can disagree — on
+        # Windows ansi.enable() switches virtual-terminal processing on, which
+        # Rich has no way to know about — and the visible result is a
+        # transcript where the harness lines are coloured and the components
+        # are not. One decision, one place.
+        # 256 colours, not Rich's own detection. On Windows it settles on the
+        # legacy 16-colour system, which collapses the whole grey palette:
+        # `grey19` becomes plain black, so the band behind a message is the
+        # same colour as the terminal and simply is not there. ansi.enable()
+        # has already switched virtual-terminal processing on, which is what
+        # makes 256 available — Rich has no way to know that happened.
         _console = Console(theme=Theme(_THEME), soft_wrap=False,
-                           highlight=False, safe_box=False)
+                           highlight=False, safe_box=False,
+                           color_system="256" if ansi._ENABLED else None,  # noqa: SLF001
+                           force_terminal=True if ansi._ENABLED else None)  # noqa: SLF001
     return _console
+
+
+def reset() -> None:
+    """Drop the cached console so the next call re-reads the colour decision.
+
+    Needed because `ansi.enable()` runs after import: a console built before it
+    would have settled on the wrong answer and kept it for the session."""
+    global _console
+    _console = None
 
 
 def width() -> int:
@@ -222,6 +250,40 @@ def markdown(text: str) -> str:
         c.print(rendered, width=min(c.width, PROSE_WIDTH))
     return "\n".join(line.rstrip()
                      for line in captured.get().rstrip("\n").split("\n"))
+
+
+def user_message(text: str, marker: str = "› ") -> str:
+    """The operator's own words, on a band that runs the width of the terminal.
+
+    Without it a question and its answer are two paragraphs of identical text
+    and the eye has to parse them to tell which is which. A filled row is read
+    before it is read — the shape alone says "this is where you spoke", which
+    is what makes a long transcript skimmable.
+
+    Full width rather than just behind the characters: a band that stops where
+    the sentence stops looks like a highlight over the words, and the thing
+    being marked is the turn, not the phrase.
+    """
+    c = console()
+    if c is None:
+        return ""
+    body = " ".join(text.split())
+    if not body:
+        return ""
+
+    import textwrap
+
+    total = c.width
+    # Wrapped by hand and each row padded to the full width. Rich will not
+    # expand a styled Text on its own, so without this the fill stops where the
+    # sentence stops and reads as a highlight over the words rather than as a
+    # band marking the turn.
+    rows = textwrap.wrap(f"{marker}{body}", width=max(10, total - 2),
+                         subsequent_indent="  ") or [marker]
+    out = []
+    for row in rows:
+        out.append(render(Text(" " + row.ljust(total - 1), style="forge.user")))
+    return "\n".join(out)
 
 
 def tool_call(label: str, target: str) -> str:

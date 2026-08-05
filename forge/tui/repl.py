@@ -34,7 +34,7 @@ from forge.tui.render import StreamRenderer, banner, humanize_error
 from forge.tui.input import InputBar
 from forge.tui.session import Session
 from forge.tui.spinner import Spinner
-from forge.tui import persistence, status
+from forge.tui import persistence, status, ui
 from forge.warden.compaction import (
     elide_old_tool_results,
     find_cut,
@@ -67,6 +67,7 @@ async def run_repl(agent: str = "optimus", workspace: Path | None = None,
     providers = extensions.tool_providers()
 
     ansi.enable()
+    ui.reset()   # the console must be built AFTER the colour decision
     cell = None
     try:
         cell = await build_cell(
@@ -124,12 +125,7 @@ async def _loop(session: Session, settings: ForgeSettings, extensions, verbose: 
             return 0
         if not entry.text:
             continue
-        # The line editor leaves the cursor at the end of what was typed, so a
-        # single newline only terminates that row and the answer begins
-        # immediately beneath the question. One blank line separates them, and
-        # that gap is what makes the transcript read as turns rather than as
-        # one continuous stream.
-        ansi.write()
+        _echo_prompt(entry.text)
 
         if entry.kind == "command":
             outcome = await _run_command(entry.text, session)
@@ -142,6 +138,27 @@ async def _loop(session: Session, settings: ForgeSettings, extensions, verbose: 
             await _run_bash(entry.text, session)
         else:
             await _run_turn(entry.text, session, settings, extensions, verbose)
+
+
+def _echo_prompt(text: str) -> None:
+    """Repaint the line just typed as a full-width band.
+
+    A question and its answer are otherwise two paragraphs of identical
+    text and the eye has to read them to tell which is which. A filled row
+    is recognised before it is read, which is what makes a long transcript
+    skimmable.
+
+    The line editor has already echoed what was typed, so this reclaims
+    those rows and prints the band over them — the same rewind the reply
+    uses. When it cannot (styling off, or the input scrolled), the echo
+    stands and only the blank line separates the two.
+    """
+    band = ui.user_message(text)
+    if band:
+        rows = ansi.wrapped_height("› " + " ".join(text.split()))
+        if ansi.rewind(rows):
+            ansi.write(band)
+    ansi.write()
 
 
 def _hint_line(session: Session) -> str:

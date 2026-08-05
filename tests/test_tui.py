@@ -466,3 +466,79 @@ def test_a_reply_starts_a_line_below_the_question():
     # A leading blank line before any prose lands.
     assert out.startswith("\n"), "the reply ran straight on from the prompt"
     assert "Hi there." in out
+
+
+# ── The operator's own message ──────────────────────────────────────────────
+
+
+def _forced_colour():
+    """A console that emits colour, as it would on a real terminal."""
+    from forge.tui import ui
+
+    ansi._ENABLED = True
+    ui.reset()
+    return ui
+
+
+def test_the_prompt_is_a_band_the_full_width_of_the_terminal():
+    """A question and its answer are otherwise two paragraphs of identical
+    text, and the eye has to read them to tell which is which. A filled row is
+    recognised before it is read."""
+    import re
+
+    ui = _forced_colour()
+    try:
+        band = ui.user_message("fix the retry logic")
+        rows = band.splitlines()
+        assert rows, "no band was drawn"
+        for row in rows:
+            plain = re.sub(r"\x1b\[[0-9;]*m", "", row)
+            assert len(plain) >= ui.console().width - 1, "the fill stopped short"
+    finally:
+        ansi._ENABLED = False
+        ui.reset()
+
+
+def test_the_band_carries_a_background_not_just_a_colour():
+    """A foreground change alone would read as emphasis on the words. The
+    thing being marked is the turn."""
+    ui = _forced_colour()
+    try:
+        assert "48;5;" in ui.user_message("hello")
+    finally:
+        ansi._ENABLED = False
+        ui.reset()
+
+
+def test_grey_survives_the_colour_system():
+    """Rich settles on legacy 16-colour on Windows, where every grey collapses
+    to black — the band becomes the terminal background and vanishes."""
+    ui = _forced_colour()
+    try:
+        assert ui.console().color_system == "256"
+    finally:
+        ansi._ENABLED = False
+        ui.reset()
+
+
+def test_a_long_message_wraps_and_every_row_is_filled():
+    import re
+
+    ui = _forced_colour()
+    try:
+        rows = ui.user_message("word " * 80).splitlines()
+        assert len(rows) > 1
+        widths = {len(re.sub(r"\x1b\[[0-9;]*m", "", r)) for r in rows}
+        assert len(widths) == 1, f"rows are ragged: {widths}"
+    finally:
+        ansi._ENABLED = False
+        ui.reset()
+
+
+def test_an_empty_message_draws_nothing():
+    ui = _forced_colour()
+    try:
+        assert ui.user_message("   ") == ""
+    finally:
+        ansi._ENABLED = False
+        ui.reset()
