@@ -197,3 +197,165 @@ def command_help() -> dict[str, str]:
     completer offers. Built from the registry so a new command shows up in
     completion by existing, with no second list to keep in step."""
     return {c.name: c.summary for c in REGISTRY.values()}
+
+
+# ── Git: what the agent actually changed ─────────────────────────────────────
+# The single most common question after a turn is "what did it do to my repo",
+# and the honest answer is git's, not the agent's. These run through the Cell so
+# they see the same working directory the agent does — including an active
+# worktree, where the operator's own `git diff` in another terminal would show
+# nothing at all.
+
+
+async def _cell_git(session: "Session", command: str) -> tuple[str, bool]:
+    """(output, ok). Never raises: a REPL command must not end the session."""
+    if session.cell is None:
+        return "No Cell attached.", False
+    try:
+        res = await session.cell.run(command, timeout=30)
+    except Exception as e:  # noqa: BLE001
+        return f"{type(e).__name__}: {e}", False
+    body = (res.stdout or "").rstrip() or (res.stderr or "").rstrip()
+    return body, res.exit_code == 0
+
+
+@command("diff", "what has changed in the working tree")
+async def _diff(args: str, session: "Session") -> CommandResult:
+    from forge.tui.render import _paint_diff_line
+
+    target = args.strip() or ""
+    out, ok = await _cell_git(session, f"git diff --stat {target}".strip())
+    if not ok:
+        return CommandResult(f"  {out}")
+    if not out:
+        return CommandResult("  Working tree clean.")
+
+    full, _ = await _cell_git(session, f"git diff {target}".strip())
+    lines = [f"  {ln}" for ln in out.splitlines()]
+    if full:
+        lines.append("")
+        lines.extend("  " + _paint_diff_line(ln) for ln in full.splitlines()[:200])
+        if len(full.splitlines()) > 200:
+            lines.append(ansi_dim("  … truncated — run `git diff` for the rest"))
+    return CommandResult("\n".join(lines))
+
+
+@command("status", "git state and where this session is", "st")
+async def _status_cmd(args: str, session: "Session") -> CommandResult:
+    from forge.tui import status as status_mod
+
+    status_mod.forget_branch(session.workspace)   # /status should re-read, not cache
+    lines = [
+        f"  agent      {session.cfg.agent_id}",
+        f"  model      {session.model_ref}",
+        f"  mode       {session.permission_mode}",
+        f"  workspace  {session.workspace}",
+    ]
+    if session.cell is not None and getattr(session.cell, "subpath", ""):
+        lines.append(f"  worktree   {session.cell.subpath}")
+    lines.append(f"  turns      {session.turns}")
+
+    out, ok = await _cell_git(session, "git status --short --branch")
+    lines.append("")
+    if ok:
+        lines.extend(f"  {ln}" for ln in (out.splitlines() or ["working tree clean"]))
+    else:
+        # Report what actually failed. Collapsing every failure to "not a git
+        # repository" tells the operator something false about their repo when
+        # the real problem is that the Cell is down — and that sends them
+        # looking in exactly the wrong place.
+        lines.extend(f"  {ln}" for ln in (out or "git is unavailable here").splitlines())
+    return CommandResult("\n".join(lines))
+
+
+@command("branch", "which branch, or switch to another")
+async def _branch(args: str, session: "Session") -> CommandResult:
+    from forge.tui import status as status_mod
+
+    name = args.strip()
+    if not name:
+        out, ok = await _cell_git(session, "git branch --show-current")
+        return CommandResult(f"  {out or 'detached or not a repository'}")
+    out, ok = await _cell_git(session, f"git checkout {name}")
+    status_mod.forget_branch(session.workspace)
+    return CommandResult(f"  {out}")
+
+
+# ── Diagnostics ──────────────────────────────────────────────────────────────
+
+
+@command("doctor", "check that this environment can actually run a turn")
+async def _doctor(args: str, session: "Session") -> CommandResult:
+    """Every check answers a question that otherwise only surfaces mid-turn, as
+    a confusing failure. Cheap to run, and each line names what to do about it."""
+    import os
+    import shutil
+
+    from forge.tui.input import AVAILABLE as INPUT_RICH
+
+    def mark(ok: bool) -> str:
+        return "ok  " if ok else "MISS"
+
+    provider = session.model_ref.split(":", 1)[0] if ":" in session.model_ref else "anthropic"
+    key_env = {"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY",
+               "gemini": "GEMINI_API_KEY", "zai": "ZAI_API_KEY",
+               "deepseek": "DEEPSEEK_API_KEY"}.get(provider, "ANTHROPIC_API_KEY")
+
+    rows = [
+        (bool(os.environ.get(key_env)), f"{key_env} set", f"the model {session.model_ref} cannot run without it"),
+        (session.cell is not None, "Cell attached", "no sandbox — run_command and file tools are dead"),
+        (bool(shutil.which("git")), "git on PATH", "worktrees, /diff and /status need it"),
+        (INPUT_RICH, "rich input line", "history and completion are off; pip install prompt_toolkit"),
+        (bool(os.environ.get("TAVILY_API_KEY")), "TAVILY_API_KEY set", "web_search will refuse"),
+        (bool(session.tools), "tools registered", "the agent has nothing to work with"),
+    ]
+    lines = [f"  [{mark(ok)}] {label}" + ("" if ok else f"\n         → {why}")
+             for ok, label, why in rows]
+
+    out, git_ok = await _cell_git(session, "git rev-parse --is-inside-work-tree")
+    lines.append(f"  [{mark(git_ok)}] workspace is a git repository"
+                 + ("" if git_ok else "\n         → worktree isolation is unavailable here"))
+    return CommandResult("\n".join(lines))
+
+
+@command("keybindings", "the keys this REPL understands", "keys")
+async def _keys(args: str, session: "Session") -> CommandResult:
+    rows = [
+        ("↑ / ↓", "walk the history of what you typed here"),
+        ("ctrl+r", "search that history"),
+        ("esc then enter", "newline instead of submitting"),
+        ("tab", "complete a /command or an @path"),
+        ("shift+tab", "switch act ⇄ plan"),
+        ("ctrl+o", "reprint the last shortened tool output in full"),
+        ("ctrl+c", "interrupt the running turn (again at an empty prompt exits)"),
+        ("ctrl+d", "end the session"),
+        ("!cmd", "run a shell command with no model turn"),
+        ("@path", "complete a file from this workspace"),
+    ]
+    width = max(len(k) for k, _ in rows)
+    return CommandResult("\n".join(f"  {k:<{width}}   {v}" for k, v in rows))
+
+
+# ── Getting the conversation out ─────────────────────────────────────────────
+
+
+@command("export", "write this conversation to a file")
+async def _export(args: str, session: "Session") -> CommandResult:
+    import json
+    from datetime import datetime
+
+    if not session.messages:
+        return CommandResult("  Nothing to export yet.")
+    name = args.strip() or f"forge-{datetime.now():%Y%m%d-%H%M%S}.json"
+    target = session.workspace / name
+    try:
+        target.write_text(json.dumps(session.messages, indent=2, default=str),
+                          encoding="utf-8")
+    except OSError as e:
+        return CommandResult(f"  Could not write {name}: {e}")
+    return CommandResult(f"  Wrote {len(session.messages)} messages to {target}")
+
+
+def ansi_dim(text: str) -> str:
+    from forge.tui import ansi
+    return ansi.paint(text, "dim")
