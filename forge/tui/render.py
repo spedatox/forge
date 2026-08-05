@@ -57,8 +57,10 @@ class StreamRenderer:
         if not text:
             return
         if self.spinner is not None:
+            # Silence it for the rest of this reply. A frame drawn while
+            # prose is mid-line eats the text already on that line.
+            self.spinner.pause()
             self.spinner.add_chars(len(text))
-            self.spinner.set_status("Responding")
         if not self._wrote_text:
             ansi.write()
             self._wrote_text = True
@@ -85,6 +87,8 @@ class StreamRenderer:
         self._in_flight.add(str(data.get("id")))
         self._batch = max(self._batch, len(self._in_flight))
         if self.spinner is not None:
+            # The reply is over and work has restarted; the line is safe again.
+            self.spinner.resume()
             self.spinner.set_status(f"Running {name}")
         args = data.get("input") or {}
         target = _summarize_args(args)

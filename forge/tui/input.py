@@ -34,6 +34,7 @@ from pathlib import Path
 try:  # optional — see module docstring
     from prompt_toolkit import PromptSession
     from prompt_toolkit.completion import Completer, Completion
+    from prompt_toolkit.shortcuts import CompleteStyle
     from prompt_toolkit.enums import EditingMode
     from prompt_toolkit.formatted_text import ANSI
     from prompt_toolkit.history import FileHistory
@@ -221,7 +222,13 @@ class InputBar:
             key_bindings=bindings,
             editing_mode=EditingMode.EMACS,   # ctrl+r reverse search comes with it
             complete_while_typing=True,
-            enable_history_search=True,       # ↑/↓ filter on what is typed
+            complete_style=CompleteStyle.MULTI_COLUMN,
+            # NOT enable_history_search. prompt_toolkit disables
+            # complete_while_typing whenever it is on — its own source says
+            # so — and that silently cost the menu that appears on `/` and
+            # `@`. It only makes ↑ filter by prefix; ↑/↓ and ctrl+r work
+            # without it, and nobody should have to remember command names
+            # to save a filtered history walk.
             multiline=False,                  # esc+enter inserts; enter submits
             mouse_support=False,              # keep native terminal selection
         )

@@ -280,3 +280,59 @@ def test_tips_can_be_suppressed():
     from forge.tui.render import banner
 
     assert "!cmd" not in banner("a", "m", "/w", 1, tips=False)
+
+
+# ── The spinner must not eat the reply ──────────────────────────────────────
+
+
+def test_streaming_prose_silences_the_spinner():
+    """The bug this exists to stop: a reply beginning mid-word.
+
+    Streamed text carries no newline until the turn ends, so the cursor sits
+    partway along a line the operator is reading. A spinner frame drawn then
+    returns to column 0 and overwrites what is already there — the visible
+    symptom was `us, ready to work` where `Optimus, ready to work` had been.
+    """
+    from forge.tui.render import StreamRenderer
+
+    sp = Spinner()
+    renderer = StreamRenderer(spinner=sp)
+
+    asyncio.run(renderer({"type": "chunk", "data": "Optimus, ready"}))
+
+    assert sp._paused, "the spinner kept drawing over streamed text"  # noqa: SLF001
+
+
+def test_a_paused_spinner_draws_nothing():
+    written: list[str] = []
+    real = ansi.write
+
+    async def scenario():
+        ansi.write = lambda text="", end="\n": written.append(text)
+        try:
+            sp = Spinner()
+            sp.start()
+            sp.pause()
+            written.clear()
+            await asyncio.sleep(0.35)
+            await sp.stop()
+        finally:
+            ansi.write = real
+
+    asyncio.run(scenario())
+    assert not any("Thinking" in w or "◐" in w for w in written)
+
+
+def test_a_tool_call_brings_it_back():
+    """The reply is over and work restarted, so the line is safe again."""
+    from forge.tui.render import StreamRenderer
+
+    sp = Spinner()
+    renderer = StreamRenderer(spinner=sp)
+
+    asyncio.run(renderer({"type": "chunk", "data": "Let me look."}))
+    assert sp._paused                                        # noqa: SLF001
+
+    asyncio.run(renderer({"type": "tool",
+                          "data": {"id": "1", "name": "grep", "input": {}}}))
+    assert not sp._paused                                    # noqa: SLF001

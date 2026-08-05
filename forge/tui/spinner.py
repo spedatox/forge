@@ -62,6 +62,7 @@ class Spinner:
         self._status = ""
         self._interruptible = interruptible
         self._visible = False
+        self._paused = False
 
     # ── lifecycle ────────────────────────────────────────────────────────────
 
@@ -86,6 +87,21 @@ class Spinner:
         if self._visible:
             ansi.clear_transient()
             self._visible = False
+
+    def pause(self) -> None:
+        """Stop drawing until something asks for it again.
+
+        Required the moment the model starts streaming prose. Streamed text
+        carries no newline until the turn ends, so the cursor sits partway
+        along a line the operator is reading — and the next frame's `\r`
+        returns to column 0 and overwrites it. The visible symptom is a
+        reply that begins in the middle of its own first word."""
+        self._paused = True
+        self.clear()
+
+    def resume(self) -> None:
+        """Draw again — the turn went back to work after speaking."""
+        self._paused = False
 
     # ── what it reports ──────────────────────────────────────────────────────
 
@@ -130,8 +146,9 @@ class Spinner:
     async def _run(self) -> None:
         try:
             while True:
-                ansi.transient(self.render())
-                self._visible = True
+                if not self._paused:
+                    ansi.transient(self.render())
+                    self._visible = True
                 await asyncio.sleep(TICK_S)
         except asyncio.CancelledError:
             raise

@@ -200,3 +200,64 @@ def test_a_read_only_workspace_does_not_stop_the_session(monkeypatch, tmp_path):
     # Constructing must not raise; whether a session is built depends on the
     # terminal, which is not what this test is about.
     InputBar(tmp_path, command_help())
+
+
+# ── The menu has to actually appear ─────────────────────────────────────────
+
+
+@pytest.mark.skipif(not AVAILABLE, reason="prompt_toolkit not installed")
+def test_completion_fires_while_typing(tmp_path):
+    """The dropdown is the whole point of having a completer.
+
+    prompt_toolkit disables complete_while_typing whenever
+    enable_history_search is on — its own source says so — and that silently
+    cost the menu on `/` and `@`. History search only makes ↑ filter by prefix;
+    nobody should have to remember command names to buy that.
+    """
+    bar = InputBar(tmp_path, command_help())
+    if bar._session is None:                       # noqa: SLF001
+        pytest.skip("no line editor in this terminal")
+
+    assert bar._session.complete_while_typing      # noqa: SLF001
+    assert not bar._session.enable_history_search  # noqa: SLF001
+
+
+@pytest.mark.skipif(not AVAILABLE, reason="prompt_toolkit not installed")
+def test_a_bare_slash_offers_every_command(tmp_path):
+    """Typing `/` alone must list them — that is the discovery path."""
+    from prompt_toolkit.document import Document
+
+    from forge.tui.input import ForgeCompleter
+
+    completer = ForgeCompleter(command_help(), tmp_path)
+    offered = [c.text for c in completer.get_completions(Document("/"), None)]
+
+    assert len(offered) > 10
+    assert "help" in offered and "resume" in offered
+
+
+@pytest.mark.skipif(not AVAILABLE, reason="prompt_toolkit not installed")
+def test_a_bare_at_offers_files(tmp_path):
+    from prompt_toolkit.document import Document
+
+    from forge.tui.input import ForgeCompleter
+
+    (tmp_path / "alpha.py").write_text("x", encoding="utf-8")
+    (tmp_path / "beta.py").write_text("x", encoding="utf-8")
+    completer = ForgeCompleter({}, tmp_path)
+
+    offered = [c.text for c in completer.get_completions(Document("look at @"), None)]
+    assert {"alpha.py", "beta.py"} <= set(offered)
+
+
+@pytest.mark.skipif(not AVAILABLE, reason="prompt_toolkit not installed")
+def test_each_command_completion_carries_its_summary(tmp_path):
+    """The menu explains itself, so choosing does not need prior knowledge."""
+    from prompt_toolkit.document import Document
+
+    from forge.tui.input import ForgeCompleter
+
+    completer = ForgeCompleter(command_help(), tmp_path)
+    resume = [c for c in completer.get_completions(Document("/resume"), None)][0]
+
+    assert resume.display_meta_text.strip()
