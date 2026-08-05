@@ -190,3 +190,10 @@ async def _transcript(args: str, session: "Session") -> CommandResult:
 @command("cwd", "which directory the agent is working in")
 async def _cwd(args: str, session: "Session") -> CommandResult:
     return CommandResult(f"  {session.workspace}")
+
+
+def command_help() -> dict[str, str]:
+    """{name: summary} for every registered command — what the input bar's
+    completer offers. Built from the registry so a new command shows up in
+    completion by existing, with no second list to keep in step."""
+    return {c.name: c.summary for c in REGISTRY.values()}

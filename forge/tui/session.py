@@ -79,6 +79,17 @@ class Session:
     messages: list[dict[str, Any]] = field(default_factory=list)
     oracle: TerminalOracle = field(default_factory=TerminalOracle)
     turns: int = 0
+    _mode: str = ""
+
+    @property
+    def permission_mode(self) -> str:
+        """The live mode. Starts at the profile's and can be cycled with
+        shift+tab; AgentConfig is frozen because it is loaded config, and a
+        session-lifetime toggle is not config."""
+        return self._mode or self.cfg.permission_mode
+
+    def set_permission_mode(self, mode: str) -> None:
+        self._mode = mode
 
     def reset(self) -> None:
         """Forget the conversation, keep the session.

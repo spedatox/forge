@@ -29,8 +29,9 @@ from forge.config import ForgeSettings
 from forge.extensions import load_extensions
 from forge.gate.protocol import JobRequest
 from forge.tui import ansi
-from forge.tui.commands import resolve as resolve_command
+from forge.tui.commands import command_help, resolve as resolve_command
 from forge.tui.render import StreamRenderer, banner, humanize_error
+from forge.tui.input import InputBar
 from forge.tui.session import Session
 from forge.warden.compaction import (
     elide_old_tool_results,
@@ -98,24 +99,68 @@ async def run_repl(agent: str = "optimus", workspace: Path | None = None,
 
 
 async def _loop(session: Session, settings: ForgeSettings, extensions, verbose: bool) -> int:
+    bar = InputBar(session.workspace, command_help(),
+                   on_cycle_mode=lambda: _cycle_permission_mode(session))
     while True:
-        try:
-            # input() blocks the event loop; off-thread keeps background work
-            # (an MCP server settling, a spilled write) alive while we wait.
-            line = (await asyncio.to_thread(input, ansi.paint("\n› ", "cyan"))).strip()
-        except (EOFError, KeyboardInterrupt):
+        entry = await bar.read(ansi.paint("\n› ", "cyan"))
+        if entry.is_eof:
             ansi.write()
             return 0
-
-        if not line:
+        if not entry.text:
             continue
 
-        if line.startswith("/"):
-            if await _run_command(line, session):
+        if entry.kind == "command":
+            if await _run_command(entry.text, session):
                 return 0
-            continue
+        elif entry.kind == "bash":
+            await _run_bash(entry.text, session)
+        else:
+            await _run_turn(entry.text, session, settings, extensions, verbose)
 
-        await _run_turn(line, session, settings, extensions, verbose)
+
+async def _run_bash(command: str, session: Session) -> None:
+    """`!cmd` — run it in the Cell and print the result. No model turn.
+
+    The escape hatch for everything that does not need reasoning: `git status`,
+    `ls`, `pytest -x`. Spending a full model turn to have the agent decide to
+    run `git status` costs a round trip and tokens to reach a foregone
+    conclusion, and the operator already knew what they wanted to run.
+
+    It does NOT enter the transcript. The model did not ask for this and did not
+    see it, so presenting it as part of the conversation would be a lie about
+    what the agent knows — if its result matters, say so in the next prompt.
+    """
+    if session.cell is None:
+        ansi.write(ansi.paint("  no Cell attached — nothing to run in", "yellow"))
+        return
+    ansi.write(ansi.paint(f"  ! {command}", "grey"))
+    try:
+        result = await session.cell.run(command)
+    except Exception as e:  # noqa: BLE001 — a bad command must not end the session
+        ansi.write(ansi.paint(f"  failed: {e}", "red"))
+        return
+    for stream, style in ((result.stdout, None), (result.stderr, "red")):
+        text = (stream or "").rstrip()
+        if not text:
+            continue
+        for line in text.splitlines():
+            ansi.write(ansi.paint(f"  {line}", style) if style else f"  {line}")
+    if result.exit_code != 0:
+        ansi.write(ansi.paint(f"  exit {result.exit_code}", "yellow"))
+
+
+def _cycle_permission_mode(session: Session) -> None:
+    """shift+tab — act ⇄ plan, the way Claude Code cycles its modes.
+
+    Plan mode denies every mutation outright, so this is the one-key way to say
+    "look, don't touch" before asking something exploratory."""
+    order = ["act", "plan"]
+    try:
+        nxt = order[(order.index(session.permission_mode) + 1) % len(order)]
+    except ValueError:
+        nxt = "act"
+    session.set_permission_mode(nxt)
+    ansi.write(ansi.paint(f"\n  permission mode: {nxt}", "cyan"))
 
 
 async def _run_command(line: str, session: Session) -> bool:
@@ -176,7 +221,7 @@ async def _run_turn(prompt: str, session: Session, settings: ForgeSettings,
 
     ctx = ToolContext(
         agent_id=session.cfg.agent_id, cell=session.cell, graph=None, files=files,
-        permissions=PermissionEngine(mode=Mode(session.cfg.permission_mode),
+        permissions=PermissionEngine(mode=Mode(session.permission_mode),
                                      allowlist=session.allowlist),
         network_allowed=session.cfg.cell.allow_network,
         oracle=session.oracle,
