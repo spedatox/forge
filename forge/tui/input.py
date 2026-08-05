@@ -238,6 +238,12 @@ class InputBar:
             editing_mode=EditingMode.EMACS,   # ctrl+r reverse search comes with it
             complete_while_typing=True,
             complete_style=CompleteStyle.MULTI_COLUMN,
+            # prompt_toolkit reserves eight rows below the input for the
+            # completion menu, permanently — which put the hint bar in the
+            # middle of the window with a block of dead space above it.
+            # The menu is occasional and the gap is constant, so the gap
+            # goes; the menu expands the area when it actually opens.
+            reserve_space_for_menu=1,
             # NOT enable_history_search. prompt_toolkit disables
             # complete_while_typing whenever it is on — its own source says
             # so — and that silently cost the menu that appears on `/` and

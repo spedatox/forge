@@ -110,13 +110,14 @@ async def _loop(session: Session, settings: ForgeSettings, extensions, verbose: 
                    hint=lambda: _hint_line(session))
     session.input_bar = bar
     while True:
-        # A rule, then the state, then the prompt. The rule closes the turn
-        # above it: without one, a reply and the next question run together
-        # and the transcript reads as a single stream rather than a
-        # conversation with turns in it.
+        # Rule and counters CLOSE the exchange above them, then a blank line,
+        # then the prompt. Sitting directly on top of the prompt they read as
+        # a header for what is about to be typed, which is the wrong tense:
+        # `106 in / 39 out` describes the turn that just finished.
         ansi.write()
-        ansi.write(ansi.paint("─" * min(ansi.terminal_width() - 1, 96), "dim"))
+        ansi.write(ansi.paint("─" * max(10, ansi.terminal_width() - 1), "dim"))
         status.write(session)
+        ansi.write()
         entry = await bar.read(ansi.paint("› ", "cyan"))
         if entry.is_eof:
             ansi.write()
