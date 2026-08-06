@@ -7,6 +7,7 @@ harness-side safety flags; the loop and permission engine read those, the model
 never sees them.
 """
 from forge.tools.shell import RunCommand
+from forge.tools.diagnostics import Diagnostics
 from forge.tools.files import ReadFile, WriteFile, EditFile
 from forge.tools.graph import GraphQuery, GraphPath, GraphOverview, GraphIndex
 from forge.tools.search import Grep, Glob
@@ -32,7 +33,7 @@ WEB_TOOLS = [WebSearch, WebFetch]
 # optional extra for real work, it is how a long job avoids drowning its own
 # context. A profile that omits it simply never spawns subagents.
 CODING_TOOLS = [*NAV_TOOLS, WriteFile, EditFile, RunCommand,
-                GraphQuery, GraphPath, GraphOverview, GraphIndex, TodoWrite,
+                GraphQuery, GraphPath, GraphOverview, GraphIndex, Diagnostics, TodoWrite,
                 EnterWorktree, ExitWorktree, TaskTool]
 
 # Centurion's group: run security tooling in the Cell (RunCommand) and read/write
@@ -43,11 +44,11 @@ SECURITY_TOOLS = [*NAV_TOOLS, RunCommand, WriteFile, EditFile]
 
 ALL_TOOLS = {cls.name: cls for cls in [
     RunCommand, ReadFile, WriteFile, EditFile, Grep, Glob,
-    GraphQuery, GraphPath, GraphOverview, GraphIndex, WebSearch, WebFetch, TodoWrite,
+    GraphQuery, GraphPath, GraphOverview, GraphIndex, Diagnostics, WebSearch, WebFetch, TodoWrite,
     EnterWorktree, ExitWorktree, TaskTool,
 ]}
 
 __all__ = ["ALL_TOOLS", "NAV_TOOLS", "CODING_TOOLS", "SECURITY_TOOLS", "WEB_TOOLS",
            "RunCommand", "ReadFile", "WriteFile", "EditFile", "Grep", "Glob",
-           "GraphQuery", "GraphPath", "GraphOverview", "GraphIndex", "WebSearch", "WebFetch",
+           "GraphQuery", "GraphPath", "GraphOverview", "GraphIndex", "Diagnostics", "WebSearch", "WebFetch",
            "TodoWrite", "EnterWorktree", "ExitWorktree", "TaskTool"]

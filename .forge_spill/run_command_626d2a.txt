@@ -1,0 +1,438 @@
+exit_code: 0
+stdout:
+     1	"""The interactive loop — Forge's local surface.
+     2	
+     3	`demo`, `serve` and `connect` all run a job somebody else asked for. This is the
+     4	one entry point where a person is present for the whole thing, which makes it
+     5	the only place several Mark II mechanisms can actually be observed: the
+     6	permission ask resolves against a human instead of a timeout, compaction happens
+     7	while you watch, and the ledger is answering a question you can ask mid-session.
+     8	
+     9	**One Cell for the session, not one per turn.** `run_job` builds a fresh Cell per
+    10	job because a dispatched job is a closed unit. A conversation is not: the file
+    11	you wrote in turn three has to still be there in turn nine, and `cd` has to
+    12	survive. So the session owns the Cell and each turn borrows it.
+    13	
+    14	**Ctrl-C interrupts the turn, not the session.** The engine already checks its
+    15	abort signal at both boundaries and returns a clean ABORTED terminal, so the
+    16	handler here only has to set the signal and let the loop unwind — the transcript
+    17	stays well-formed and the next prompt starts from a consistent state.
+    18	"""
+    19	from __future__ import annotations
+    20	
+    21	import asyncio
+    22	import os
+    23	from pathlib import Path
+    24	
+    25	from forge.agents.registry import AgentRegistry
+    26	from forge.cell.factory import build_cell
+    27	from forge.cell.base import CellPolicy
+    28	from forge.config import ForgeSettings
+    29	from forge.extensions import load_extensions
+    30	from forge.gate.protocol import JobRequest
+    31	from forge.tui import ansi
+    32	from forge.tui.commands import command_help, resolve as resolve_command
+    33	from forge.tui.render import StreamRenderer, banner, humanize_error
+    34	from forge.tui.input import InputBar
+    35	from forge.tui.session import Session
+    36	from forge.tui.spinner import Spinner
+    37	from forge.tui import persistence, status, ui
+    38	from forge.warden.compaction import (
+    39	    elide_old_tool_results,
+    40	    find_cut,
+    41	    rebuild,
+    42	    render_for_summary,
+    43	    summarize,
+    44	)
+    45	from forge.warden.engine import Warden
+    46	from forge.warden.filestate import FileStateCache
+    47	from forge.warden.ledger import TokenLedger
+    48	from forge.warden.permissions import AllowList, Mode, PermissionEngine
+    49	from forge.warden.state import StopReason
+    50	from forge.warden.subagents import SubagentRunner
+    51	from forge.warden.tool import ToolContext
+    52	from forge.warden.toolsource import close_providers, fold_providers, without_graph_tools
+    53	
+    54	
+    55	async def run_repl(agent: str = "optimus", workspace: Path | None = None,
+    56	                   verbose: bool = False, model_override: str | None = None) -> int:
+    57	    settings = ForgeSettings.from_env()
+    58	    registry = AgentRegistry.load()
+    59	    try:
+    60	        cfg = registry.get(agent)
+    61	    except KeyError as e:
+    62	        ansi.write(ansi.paint(f"  {e}", "red"))
+    63	        return 1
+    64	
+    65	    workspace = Path(workspace or Path.cwd()).resolve()
+    66	    model_ref = model_override or cfg.model_ref
+    67	    extensions = load_extensions()
+    68	    providers = extensions.tool_providers()
+    69	
+    70	    ansi.enable()
+    71	    ui.reset()   # the console must be built AFTER the colour decision
+    72	    cell = None
+    73	    try:
+    74	        cell = await build_cell(
+    75	            agent_id=cfg.agent_id, workspace_root=settings.workspace_root,
+    76	            backend=cfg.cell.backend or settings.cell_backend,
+    77	            image=cfg.cell.image or settings.cell_image,
+    78	            policy=CellPolicy(allow_network=cfg.cell.allow_network,
+    79	                              cpus=cfg.cell.cpus, memory_mb=cfg.cell.memory_mb,
+    80	                              default_timeout_s=cfg.cell.timeout_s,
+    81	                              run_as_root=cfg.cell.run_as_root,
+    82	                              cap_add=cfg.cell.cap_add,
+    83	                              # So a commit records who actually wrote it.
+    84	                              env=cfg.git.env()),
+    85	            workspace=workspace)
+    86	
+    87	        request = JobRequest(agent=cfg.agent_id, task="", repo_path=str(workspace))
+    88	        # The session holds the FULL set; the per-turn filter in _run_turn
+    89	        # decides what the model sees. The REPL starts no sidecar, so the graph
+    90	        # QUERY tools are withheld until graph_index builds one — they would
+    91	        # otherwise answer "unavailable" to a model their own descriptions told
+    92	        # to try them first.
+    93	        tools = await fold_providers(providers, cfg, request)
+    94	
+    95	        session = Session(
+    96	            cfg=cfg, model_ref=model_ref, workspace=workspace, tools=tools, cell=cell,
+    97	            ledger=TokenLedger(context_limit=settings.context_limit,
+    98	                               max_output_tokens=settings.max_tokens),
+    99	            allowlist=AllowList.load(settings.allowlist_path),
+   100	            session_id=persistence.new_id())
+   101	
+   102	        ansi.write(banner(f"{cfg.name} ({cfg.agent_id})", model_ref, str(workspace), len(tools)))
+   103	        return await _loop(session, settings, extensions, verbose)
+   104	    except Exception as e:  # noqa: BLE001 — a failed start should say why, not traceback
+   105	        ansi.write(ansi.paint(f"  could not start: {type(e).__name__}: {e}", "red"))
+   106	        return 1
+   107	    finally:
+   108	        await close_providers(providers)
+   109	        if cell is not None:
+   110	            await cell.close()
+   111	
+   112	
+   113	async def _loop(session: Session, settings: ForgeSettings, extensions, verbose: bool) -> int:
+   114	    bar = InputBar(session.workspace, command_help(),
+   115	                   on_cycle_mode=lambda: _cycle_permission_mode(session),
+   116	                   on_toggle_expand=lambda: _expand_last(session),
+   117	                   hint=lambda: _hint_line(session))
+   118	    session.input_bar = bar
+   119	    while True:
+   120	        # Rule and counters CLOSE the exchange above them, then a blank line,
+   121	        # then the prompt. Sitting directly on top of the prompt they read as
+   122	        # a header for what is about to be typed, which is the wrong tense:
+   123	        # `106 in / 39 out` describes the turn that just finished.
+   124	        ansi.write()
+   125	        ansi.write(ansi.paint("─" * max(10, ansi.terminal_width() - 1), "dim"))
+   126	        status.write(session)
+   127	        ansi.write()
+   128	        entry = await bar.read(ansi.paint("› ", "cyan"))
+   129	        if entry.is_eof:
+   130	            ansi.write()
+   131	            return 0
+   132	        if not entry.text:
+   133	            continue
+   134	        _echo_prompt(entry.text)
+   135	
+   136	        if entry.kind == "command":
+   137	            outcome = await _run_command(entry.text, session)
+   138	            if outcome is True:
+   139	                return 0
+   140	            if isinstance(outcome, str) and outcome:
+   141	                # A command asked for a turn (/review). Run it as if typed.
+   142	                await _run_turn(outcome, session, settings, extensions, verbose)
+   143	        elif entry.kind == "bash":
+   144	            await _run_bash(entry.text, session)
+   145	        else:
+   146	            await _run_turn(entry.text, session, settings, extensions, verbose)
+   147	
+   148	
+   149	def _echo_prompt(text: str) -> None:
+   150	    """Repaint the line just typed as a full-width band.
+   151	
+   152	    A question and its answer are otherwise two paragraphs of identical
+   153	    text and the eye has to read them to tell which is which. A filled row
+   154	    is recognised before it is read, which is what makes a long transcript
+   155	    skimmable.
+   156	
+   157	    The line editor has already echoed what was typed, so this reclaims
+   158	    those rows and prints the band over them — the same rewind the reply
+   159	    uses. When it cannot (styling off, or the input scrolled), the echo
+   160	    stands and only the blank line separates the two.
+   161	    """
+   162	    band = ui.user_message(text)
+   163	    if band:
+   164	        rows = ansi.wrapped_height("› " + " ".join(text.split()))
+   165	        if ansi.rewind(rows):
+   166	            ansi.write(band)
+   167	    ansi.write()
+   168	
+   169	
+   170	def _hint_line(session: Session) -> str:
+   171	    """What sits under the input.
+   172	
+   173	    Only what changes with state or is otherwise undiscoverable. A static
+   174	    row of every shortcut becomes furniture within a day; the mode belongs
+   175	    here because it silently governs whether the next request can write
+   176	    anything at all."""
+   177	    bits = ["? /help", "!cmd shell", "@file path"]
+   178	    mode = session.permission_mode
+   179	    bits.append("shift+tab plan" if mode == "act" else "PLAN — edits denied")
+   180	    return ansi.paint("  " + "   ".join(bits), "dim")
+   181	
+   182	
+   183	async def _run_bash(command: str, session: Session) -> None:
+   184	    """`!cmd` — run it in the Cell and print the result. No model turn.
+   185	
+   186	    The escape hatch for everything that does not need reasoning: `git status`,
+   187	    `ls`, `pytest -x`. Spending a full model turn to have the agent decide to
+   188	    run `git status` costs a round trip and tokens to reach a foregone
+   189	    conclusion, and the operator already knew what they wanted to run.
+   190	
+   191	    It does NOT enter the transcript. The model did not ask for this and did not
+   192	    see it, so presenting it as part of the conversation would be a lie about
+   193	    what the agent knows — if its result matters, say so in the next prompt.
+   194	    """
+   195	    if session.cell is None:
+   196	        ansi.write(ansi.paint("  no Cell attached — nothing to run in", "yellow"))
+   197	        return
+   198	    ansi.write(ansi.paint(f"  ! {command}", "grey"))
+   199	    try:
+   200	        result = await session.cell.run(command)
+   201	    except Exception as e:  # noqa: BLE001 — a bad command must not end the session
+   202	        ansi.write(ansi.paint(f"  failed: {e}", "red"))
+   203	        return
+   204	    for stream, style in ((result.stdout, None), (result.stderr, "red")):
+   205	        text = (stream or "").rstrip()
+   206	        if not text:
+   207	            continue
+   208	        for line in text.splitlines():
+   209	            ansi.write(ansi.paint(f"  {line}", style) if style else f"  {line}")
+   210	    if result.exit_code != 0:
+   211	        ansi.write(ansi.paint(f"  exit {result.exit_code}", "yellow"))
+   212	
+   213	
+   214	def _expand_last(session: Session) -> None:
+   215	    """ctrl+o — put back what the one-line view cut.
+   216	
+   217	    An inline renderer cannot reach up and rewrite output that has already
+   218	    scrolled, so "expand" means printing the last shortened result again, in
+   219	    full. That is also when the operator actually wants it: they read the
+   220	    truncated line, and only then decide they needed the rest."""
+   221	    if not session.last_truncated:
+   222	        ansi.write(ansi.paint("\n  nothing to expand", "dim"))
+   223	        return
+   224	    name, text = session.last_truncated
+   225	    ansi.write()
+   226	    ansi.write(ansi.paint(f"  ⏶ {name} — full output", "cyan"))
+   227	    for line in text.splitlines() or [""]:
+   228	        ansi.write("      " + ansi.paint(line, "grey"))
+   229	
+   230	
+   231	def _cycle_permission_mode(session: Session) -> None:
+   232	    """shift+tab — act / plan, the way Claude Code cycles its modes.
+   233	
+   234	    Plan mode denies every mutation outright, so this is the one-key way to say
+   235	    "look, don't touch" before asking something exploratory."""
+   236	    order = ["act", "plan"]
+   237	    try:
+   238	        nxt = order[(order.index(session.permission_mode) + 1) % len(order)]
+   239	    except ValueError:
+   240	        nxt = "act"
+   241	    session.set_permission_mode(nxt)
+   242	    ansi.write(ansi.paint(f"\n  permission mode: {nxt}", "cyan"))
+   243	
+   244	
+   245	async def _run_command(line: str, session: Session) -> "bool | str":
+   246	    """True to end the session, a string to run as a turn, else False."""
+   247	    cmd, args = resolve_command(line)
+   248	    if cmd is None:
+   249	        ansi.write(ansi.paint(f"  unknown command: {line.split()[0]} — try /help", "yellow"))
+   250	        return False
+   251	
+   252	    result = await cmd.run(args, session)
+   253	    if result.text:
+   254	        ansi.write(result.text)
+   255	    if result.clear:
+   256	        session.reset()
+   257	        ansi.write(ansi.paint("  conversation cleared", "grey"))
+   258	    if result.compact:
+   259	        await _compact_now(session)
+   260	    if result.quit:
+   261	        return True
+   262	    return result.prompt or False
+   263	
+   264	
+   265	async def _compact_now(session: Session) -> None:
+   266	    """`/compact` on demand — the same two layers the engine runs itself."""
+   267	    before = len(session.messages)
+   268	    messages, freed = elide_old_tool_results(session.messages, keep_cycles=1)
+   269	    session.messages = messages
+   270	    if freed:
+   271	        ansi.write(ansi.paint(f"  ◆ reclaimed {freed:,} chars of old tool output", "magenta"))
+   272	
+   273	    cut = find_cut(session.messages, keep_cycles=2)
+   274	    if cut is None:
+   275	        ansi.write(ansi.paint("  nothing further to summarize", "grey"))
+   276	        return
+   277	
+   278	    ansi.write(ansi.paint("  ◆ summarizing…", "magenta"))
+   279	    model = _build_model(session)
+   280	    summary = await summarize(model, render_for_summary(session.messages[1:cut]),
+   281	                              asyncio.Event())
+   282	    if summary is None:
+   283	        ansi.write(ansi.paint("  the summary call failed; nothing was changed", "yellow"))
+   284	        return
+   285	    session.messages = rebuild(session.messages, cut, summary)
+   286	    # The model's memory of file contents is the summary's now, not the cache's.
+   287	    ansi.write(ansi.paint(
+   288	        f"  ◆ {before} messages → {len(session.messages)}", "magenta"))
+   289	
+   290	
+   291	def _build_model(session: Session):
+   292	    from forge.model.factory import build_model
+   293	    settings = ForgeSettings.from_env()
+   294	    return build_model(session.model_ref, settings, max_tokens=settings.max_tokens)
+   295	
+   296	
+   297	async def _run_turn(prompt: str, session: Session, settings: ForgeSettings,
+   298	                    extensions, verbose: bool) -> None:
+   299	    signal = asyncio.Event()
+   300	    spinner = Spinner()
+   301	    renderer = StreamRenderer(
+   302	        verbose=verbose, spinner=spinner,
+   303	        on_truncated=lambda name, text: setattr(session, "last_truncated", (name, text)),
+   304	    )
+   305	    files = FileStateCache()
+   306	
+   307	    ctx = ToolContext(
+   308	        agent_id=session.cfg.agent_id, cell=session.cell, graph=None, files=files,
+   309	        permissions=PermissionEngine(mode=Mode(session.permission_mode),
+   310	                                     allowlist=session.allowlist),
+   311	        network_allowed=session.cfg.cell.allow_network,
+   312	        oracle=session.oracle,
+   313	        hooks=list(extensions.hooks),
+   314	    )
+   315	
+   316	    model = _build_model(session)
+   317	
+   318	    async def _tools() -> dict:
+   319	        """The session's tools, minus the graph queries until a graph exists.
+   320	
+   321	        The REPL starts no sidecar, so those tools would answer "unavailable"
+   322	        to a model their own descriptions told to try them first. `graph_index`
+   323	        is always present and can build one mid-session — this re-check is what
+   324	        lets the query tools appear afterwards instead of staying withheld for
+   325	        a graph the agent has just created."""
+   326	        live = ctx.graph
+   327	        if live is not None and getattr(live, "available", False):
+   328	            return dict(session.tools)
+   329	        return without_graph_tools(session.tools)
+   330	
+   331	    warden = Warden(
+   332	        system_prompt=_system_prompt(session, extensions),
+   333	        tools=await _tools(), model=model, ctx=ctx,
+   334	        max_iterations=session.cfg.max_iterations, signal=signal,
+   335	        ledger=session.ledger,
+   336	        retry_attempts=settings.retry_attempts,
+   337	        retry_base_delay=settings.retry_base_delay_s,
+   338	        refresh_tools=_tools,
+   339	        emit=renderer,
+   340	    )
+   341	
+   342	    # Subagents get the same Cell, model, interrupt signal and ledger as the
+   343	    # turn that spawned them — they differ only in prompt, toolset, and having
+   344	    # their own message list. Sharing `signal` is what makes ctrl+c reach a
+   345	    # child; sharing `ledger` is what keeps /cost honest.
+   346	    ctx.subagents = SubagentRunner(
+   347	        build_warden=lambda **kw: Warden(
+   348	            model=model, ctx=ctx, signal=signal, ledger=session.ledger,
+   349	            retry_attempts=settings.retry_attempts,
+   350	            retry_base_delay=settings.retry_base_delay_s,
+   351	            **kw,              # includes the child's scoped emit
+   352	        ),
+   353	        parent_tools=lambda: session.tools,
+   354	        emit=renderer,
+   355	    )
+   356	
+   357	    # Continue the conversation rather than starting one: seed the loop with
+   358	    # everything said so far, so turn nine remembers turn three.
+   359	    warden_task = asyncio.create_task(_drive(warden, session, prompt))
+   360	    spinner.start()
+   361	    try:
+   362	        terminal = await asyncio.shield(warden_task)
+   363	    except KeyboardInterrupt:
+   364	        # Ask the loop to stop at its next boundary. It back-fills any pending
+   365	        # tool_results so the transcript stays well-formed, then returns ABORTED.
+   366	        signal.set()
+   367	        spinner.set_status("Interrupting")
+   368	        ansi.write()
+   369	        ansi.write(ansi.paint("  ⏹ interrupting…", "yellow"))
+   370	        terminal = await warden_task
+   371	    except asyncio.CancelledError:
+   372	        signal.set()
+   373	        raise
+   374	    finally:
+   375	        # Always: an exception must not leave a spinner redrawing over the
+   376	        # next prompt forever.
+   377	        await spinner.stop()
+   378	
+   379	    session.messages = list(terminal.messages)
+   380	    session.turns += 1
+   381	    persistence.save(session, session.session_id)
+   382	    _report(terminal, session, verbose, already_shown=renderer.saw_error)
+   383	
+   384	
+   385	async def _drive(warden: Warden, session: Session, prompt: str):
+   386	    """Run one turn over the session's accumulated transcript."""
+   387	    if session.messages:
+   388	        warden_state_messages = [*session.messages, {"role": "user", "content": prompt}]
+   389	        return await warden.run_messages(warden_state_messages)
+   390	    return await warden.run(prompt)
+   391	
+   392	
+   393	def _system_prompt(session: Session, extensions) -> str:
+   394	    """The standalone TUI's prompt.
+   395	
+   396	    This path never has Mark VI on the other end, so the owner's memory comes
+   397	    from the snapshot the peer path cached — labelled as a snapshot, and dated,
+   398	    so stale facts are not stated as current. See forge/agents/owner_memory.py.
+   399	    """
+   400	    from forge.agents import conventions, owner_memory
+   401	    from forge.agents.prompt import PromptFragment, compose_system_prompt
+   402	
+   403	    repo = conventions.fragment(session.workspace)
+   404	    owner = owner_memory.offline_fragment()
+   405	    return compose_system_prompt([
+   406	        PromptFragment("profile", session.cfg.system_prompt),
+   407	        *([owner] if owner else []),
+   408	        *([repo] if repo else []),
+   409	        *extensions.fragments,
+   410	    ])
+   411	
+   412	
+   413	def _report(terminal, session: Session, verbose: bool, already_shown: bool = False) -> None:
+   414	    if terminal.reason is StopReason.ABORTED:
+   415	        ansi.write(ansi.paint("  ⏹ stopped", "yellow"))
+   416	    elif terminal.reason is StopReason.MAX_ITERATIONS:
+   417	        # The transcript is intact and the next prompt continues from it, so say
+   418	        # that. Reporting only the ceiling reads as "the work is lost", and an
+   419	        # operator who does not know they can simply say "carry on" starts the
+   420	        # whole job again.
+   421	        ansi.write(ansi.paint(
+   422	            f"  ⏹ hit the {session.cfg.max_iterations}-iteration ceiling — "
+   423	            "the work so far is kept", "yellow"))
+   424	        ansi.write(ansi.paint(
+   425	            "    say 'continue' to carry on from here, or /compact first if the "
+   426	            "context is full", "dim"))
+   427	    elif terminal.reason is StopReason.ERROR and not already_shown:
+   428	        # The renderer usually showed this already, via the error event. Saying
+   429	        # it twice makes one failure look like two.
+   430	        ansi.write(ansi.paint(f"  ✗ {humanize_error(terminal.error or '')}", "red"))
+   431	
+   432	    if verbose or terminal.reason is not StopReason.COMPLETED:
+   433	        usage = terminal.usage or {}
+   434	        ansi.write(ansi.paint(
+   435	            f"  {terminal.iterations} iterations · {usage.get('prompt', 0):,} tokens in context",
+   436	            "dim"))

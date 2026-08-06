@@ -1,0 +1,668 @@
+exit_code: 0
+stdout:
+     1	"""Slash commands — a registry, like every other extension point in Forge.
+     2	
+     3	The reference harness has 101 of these. Forge has the dozen that answer a
+     4	question you cannot otherwise answer from inside a session: what is this costing,
+     5	how full is the window, what can the agent reach, what did the operator already
+     6	approve.
+     7	
+     8	Each command returns a `CommandResult` rather than printing. That keeps them
+     9	testable without a terminal, and it is what lets `/compact` hand work back to the
+    10	session instead of reaching into it — a command that printed would have to know
+    11	about rendering, and a command that mutated state directly would have to know
+    12	about the loop.
+    13	"""
+    14	from __future__ import annotations
+    15	
+    16	from dataclasses import dataclass, field
+    17	from typing import TYPE_CHECKING, Awaitable, Callable
+    18	
+    19	if TYPE_CHECKING:
+    20	    from forge.tui.session import Session
+    21	
+    22	
+    23	@dataclass
+    24	class CommandResult:
+    25	    """What a command wants done. `text` is shown; the flags ask the session for
+    26	    something only the session can do."""
+    27	    text: str = ""
+    28	    quit: bool = False
+    29	    clear: bool = False
+    30	    compact: bool = False
+    31	    prompt: str = ""
+    32	    """Run this as a normal turn after showing `text`.
+    33	
+    34	    Lets a command hand work to the model without knowing anything about the
+    35	    loop — /review is a diff plus a request to read it, and writing that by
+    36	    hand every time is exactly the friction that stops it happening."""
+    37	
+    38	
+    39	@dataclass
+    40	class Command:
+    41	    name: str
+    42	    summary: str                 # one line, shown by /help
+    43	    run: "Callable[[str, Session], Awaitable[CommandResult]]"
+    44	    aliases: tuple[str, ...] = ()
+    45	
+    46	
+    47	REGISTRY: dict[str, Command] = {}
+    48	
+    49	
+    50	def register(command: Command) -> Command:
+    51	    """Add a command. Later registration wins for a name — the registry is
+    52	    ordinary state, and a caller replacing a builtin has said what they meant."""
+    53	    REGISTRY[command.name] = command
+    54	    for alias in command.aliases:
+    55	        REGISTRY[alias] = command
+    56	    return command
+    57	
+    58	
+    59	def resolve(line: str) -> "tuple[Command | None, str]":
+    60	    """Split `/name rest` into its command and argument string."""
+    61	    body = line[1:].strip()
+    62	    if not body:
+    63	        return None, ""
+    64	    name, _, rest = body.partition(" ")
+    65	    return REGISTRY.get(name.lower()), rest.strip()
+    66	
+    67	
+    68	def command(name: str, summary: str, *aliases: str):
+    69	    def wrap(fn):
+    70	        register(Command(name=name, summary=summary, run=fn, aliases=aliases))
+    71	        return fn
+    72	    return wrap
+    73	
+    74	
+    75	# ── The commands ─────────────────────────────────────────────────────────────
+    76	@command("help", "list these commands", "?", "h")
+    77	async def _help(args: str, session: "Session") -> CommandResult:
+    78	    seen: dict[str, Command] = {}
+    79	    for cmd in REGISTRY.values():
+    80	        seen[cmd.name] = cmd
+    81	    width = max(len(c.name) for c in seen.values()) + 2
+    82	    lines = [f"  /{c.name:<{width}}{c.summary}" for c in sorted(seen.values(), key=lambda c: c.name)]
+    83	    return CommandResult("\n".join(lines) + "\n\n  Ctrl-C interrupts a running turn; Ctrl-D exits.")
+    84	
+    85	
+    86	@command("exit", "leave the session", "quit", "q")
+    87	async def _exit(args: str, session: "Session") -> CommandResult:
+    88	    return CommandResult(quit=True)
+    89	
+    90	
+    91	@command("clear", "forget the conversation and start fresh")
+    92	async def _clear(args: str, session: "Session") -> CommandResult:
+    93	    return CommandResult(clear=True)
+    94	
+    95	
+    96	@command("compact", "summarize the conversation now, freeing context")
+    97	async def _compact(args: str, session: "Session") -> CommandResult:
+    98	    if not session.messages:
+    99	        return CommandResult("Nothing to compact yet.")
+   100	    return CommandResult(compact=True)
+   101	
+   102	
+   103	@command("cost", "what this session has spent")
+   104	async def _cost(args: str, session: "Session") -> CommandResult:
+   105	    led = session.ledger
+   106	    if not led.turns:
+   107	        return CommandResult("No model turns yet.")
+   108	    lines = [
+   109	        f"  turns          {led.turns}",
+   110	        f"  input          {led.input_tokens:,} uncached",
+   111	        f"  output         {led.output_tokens:,}",
+   112	        f"  cache read     {led.cache_read_tokens:,}",
+   113	        f"  cache written  {led.cache_write_tokens:,}",
+   114	    ]
+   115	    if led.estimated:
+   116	        # Never present a guess as a measurement.
+   117	        lines.append("\n  These are ESTIMATES — this provider does not report usage.")
+   118	    return CommandResult("\n".join(lines))
+   119	
+   120	
+   121	@command("context", "how full the window is, and what is in it", "ctx")
+   122	async def _context(args: str, session: "Session") -> CommandResult:
+   123	    led = session.ledger
+   124	    used, limit = led.prompt_tokens, led.effective_limit
+   125	    pct = int(100 * used / max(1, limit))
+   126	    filled = int(28 * used / max(1, limit))
+   127	    bar = "█" * min(28, filled) + "░" * max(0, 28 - filled)
+   128	    lines = [
+   129	        f"  [{bar}] {pct}%",
+   130	        f"  {used:,} of {limit:,} usable tokens"
+   131	        + ("  (estimated)" if led.estimated else ""),
+   132	        f"  compaction at  {led.compact_at:,}",
+   133	        f"  messages       {len(session.messages)}",
+   134	    ]
+   135	    if led.should_compact():
+   136	        lines.append("\n  Over the threshold — the next turn will compact first.")
+   137	    return CommandResult("\n".join(lines))
+   138	
+   139	
+   140	@command("tools", "what the agent can reach")
+   141	async def _tools(args: str, session: "Session") -> CommandResult:
+   142	    if not session.tools:
+   143	        return CommandResult("No tools.")
+   144	    width = max(len(n) for n in session.tools) + 2
+   145	    lines = []
+   146	    for name in sorted(session.tools):
+   147	        tool = session.tools[name]
+   148	        marks = []
+   149	        if tool.READ_ONLY:
+   150	            marks.append("read-only")
+   151	        if tool.CONCURRENCY_SAFE:
+   152	            marks.append("parallel")
+   153	        suffix = f"  [{', '.join(marks)}]" if marks else ""
+   154	        lines.append(f"  {name:<{width}}{ansi_first_sentence(tool.description)}{suffix}")
+   155	    return CommandResult("\n".join(lines))
+   156	
+   157	
+   158	def ansi_first_sentence(text: str, limit: int = 60) -> str:
+   159	    head = text.split(". ")[0].strip()
+   160	    return head if len(head) <= limit else head[: limit - 1] + "…"
+   161	
+   162	
+   163	@command("model", "which model this session uses")
+   164	async def _model(args: str, session: "Session") -> CommandResult:
+   165	    return CommandResult(f"  {session.model_ref}\n  window {session.ledger.context_limit:,} tokens")
+   166	
+   167	
+   168	@command("agent", "the agent profile in use")
+   169	async def _agent(args: str, session: "Session") -> CommandResult:
+   170	    cfg = session.cfg
+   171	    return CommandResult(
+   172	        f"  {cfg.agent_id} — {cfg.name}\n"
+   173	        f"  domain     {cfg.domain}\n"
+   174	        f"  mode       {cfg.permission_mode}\n"
+   175	        f"  max iters  {cfg.max_iterations}")
+   176	
+   177	
+   178	@command("approved", "operations you have permanently approved")
+   179	async def _approved(args: str, session: "Session") -> CommandResult:
+   180	    entries = sorted(session.allowlist.entries)
+   181	    if not entries:
+   182	        return CommandResult("Nothing approved yet. Gated operations will ask.")
+   183	    return CommandResult("\n".join(f"  {e}" for e in entries)
+   184	                         + f"\n\n  Stored in {session.allowlist.path or '(memory only)'}")
+   185	
+   186	
+   187	@command("transcript", "dump the raw conversation")
+   188	async def _transcript(args: str, session: "Session") -> CommandResult:
+   189	    from forge.warden.compaction import render_for_summary
+   190	
+   191	    if not session.messages:
+   192	        return CommandResult("Empty.")
+   193	    return CommandResult(render_for_summary(session.messages))
+   194	
+   195	
+   196	@command("cwd", "which directory the agent is working in")
+   197	async def _cwd(args: str, session: "Session") -> CommandResult:
+   198	    return CommandResult(f"  {session.workspace}")
+   199	
+   200	
+   201	def command_help() -> dict[str, str]:
+   202	    """{name: summary} for every registered command — what the input bar's
+   203	    completer offers. Built from the registry so a new command shows up in
+   204	    completion by existing, with no second list to keep in step."""
+   205	    return {c.name: c.summary for c in REGISTRY.values()}
+   206	
+   207	
+   208	# ── Git: what the agent actually changed ─────────────────────────────────────
+   209	# The single most common question after a turn is "what did it do to my repo",
+   210	# and the honest answer is git's, not the agent's. These run through the Cell so
+   211	# they see the same working directory the agent does — including an active
+   212	# worktree, where the operator's own `git diff` in another terminal would show
+   213	# nothing at all.
+   214	
+   215	
+   216	async def _cell_git(session: "Session", command: str) -> tuple[str, bool]:
+   217	    """(output, ok). Never raises: a REPL command must not end the session."""
+   218	    if session.cell is None:
+   219	        return "No Cell attached.", False
+   220	    try:
+   221	        res = await session.cell.run(command, timeout=30)
+   222	    except Exception as e:  # noqa: BLE001
+   223	        return f"{type(e).__name__}: {e}", False
+   224	    body = (res.stdout or "").rstrip() or (res.stderr or "").rstrip()
+   225	    return body, res.exit_code == 0
+   226	
+   227	
+   228	@command("diff", "what has changed in the working tree")
+   229	async def _diff(args: str, session: "Session") -> CommandResult:
+   230	    from forge.tui.render import _paint_diff_line
+   231	
+   232	    target = args.strip() or ""
+   233	    out, ok = await _cell_git(session, f"git diff --stat {target}".strip())
+   234	    if not ok:
+   235	        return CommandResult(f"  {out}")
+   236	    if not out:
+   237	        return CommandResult("  Working tree clean.")
+   238	
+   239	    full, _ = await _cell_git(session, f"git diff {target}".strip())
+   240	    lines = [f"  {ln}" for ln in out.splitlines()]
+   241	    if full:
+   242	        lines.append("")
+   243	        lines.extend("  " + _paint_diff_line(ln) for ln in full.splitlines()[:200])
+   244	        if len(full.splitlines()) > 200:
+   245	            lines.append(ansi_dim("  … truncated — run `git diff` for the rest"))
+   246	    return CommandResult("\n".join(lines))
+   247	
+   248	
+   249	@command("status", "git state and where this session is", "st")
+   250	async def _status_cmd(args: str, session: "Session") -> CommandResult:
+   251	    from forge.tui import status as status_mod
+   252	
+   253	    status_mod.forget_branch(session.workspace)   # /status should re-read, not cache
+   254	    lines = [
+   255	        f"  agent      {session.cfg.agent_id}",
+   256	        f"  model      {session.model_ref}",
+   257	        f"  mode       {session.permission_mode}",
+   258	        f"  workspace  {session.workspace}",
+   259	    ]
+   260	    if session.cell is not None and getattr(session.cell, "subpath", ""):
+   261	        lines.append(f"  worktree   {session.cell.subpath}")
+   262	    lines.append(f"  turns      {session.turns}")
+   263	
+   264	    out, ok = await _cell_git(session, "git status --short --branch")
+   265	    lines.append("")
+   266	    if ok:
+   267	        lines.extend(f"  {ln}" for ln in (out.splitlines() or ["working tree clean"]))
+   268	    else:
+   269	        # Report what actually failed. Collapsing every failure to "not a git
+   270	        # repository" tells the operator something false about their repo when
+   271	        # the real problem is that the Cell is down — and that sends them
+   272	        # looking in exactly the wrong place.
+   273	        lines.extend(f"  {ln}" for ln in (out or "git is unavailable here").splitlines())
+   274	    return CommandResult("\n".join(lines))
+   275	
+   276	
+   277	@command("branch", "which branch, or switch to another")
+   278	async def _branch(args: str, session: "Session") -> CommandResult:
+   279	    from forge.tui import status as status_mod
+   280	
+   281	    name = args.strip()
+   282	    if not name:
+   283	        out, ok = await _cell_git(session, "git branch --show-current")
+   284	        return CommandResult(f"  {out or 'detached or not a repository'}")
+   285	    out, ok = await _cell_git(session, f"git checkout {name}")
+   286	    status_mod.forget_branch(session.workspace)
+   287	    return CommandResult(f"  {out}")
+   288	
+   289	
+   290	# ── Diagnostics ──────────────────────────────────────────────────────────────
+   291	
+   292	
+   293	@command("doctor", "check that this environment can actually run a turn")
+   294	async def _doctor(args: str, session: "Session") -> CommandResult:
+   295	    """Every check answers a question that otherwise only surfaces mid-turn, as
+   296	    a confusing failure. Cheap to run, and each line names what to do about it."""
+   297	    import os
+   298	    import shutil
+   299	
+   300	    from forge.tui.input import AVAILABLE as INPUT_RICH
+   301	
+   302	    def mark(ok: bool) -> str:
+   303	        return "ok  " if ok else "MISS"
+   304	
+   305	    provider = session.model_ref.split(":", 1)[0] if ":" in session.model_ref else "anthropic"
+   306	    key_env = {"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY",
+   307	               "gemini": "GEMINI_API_KEY", "zai": "ZAI_API_KEY",
+   308	               "deepseek": "DEEPSEEK_API_KEY"}.get(provider, "ANTHROPIC_API_KEY")
+   309	
+   310	    rows = [
+   311	        (bool(os.environ.get(key_env)), f"{key_env} set", f"the model {session.model_ref} cannot run without it"),
+   312	        (session.cell is not None, "Cell attached", "no sandbox — run_command and file tools are dead"),
+   313	        (bool(shutil.which("git")), "git on PATH", "worktrees, /diff and /status need it"),
+   314	        (INPUT_RICH, "rich input line", "history and completion are off; pip install prompt_toolkit"),
+   315	        (bool(os.environ.get("TAVILY_API_KEY")), "TAVILY_API_KEY set", "web_search will refuse"),
+   316	        (bool(session.tools), "tools registered", "the agent has nothing to work with"),
+   317	    ]
+   318	    lines = [f"  [{mark(ok)}] {label}" + ("" if ok else f"\n         → {why}")
+   319	             for ok, label, why in rows]
+   320	
+   321	    out, git_ok = await _cell_git(session, "git rev-parse --is-inside-work-tree")
+   322	    lines.append(f"  [{mark(git_ok)}] workspace is a git repository"
+   323	                 + ("" if git_ok else "\n         → worktree isolation is unavailable here"))
+   324	    return CommandResult("\n".join(lines))
+   325	
+   326	
+   327	@command("keybindings", "the keys this REPL understands", "keys")
+   328	async def _keys(args: str, session: "Session") -> CommandResult:
+   329	    rows = [
+   330	        ("↑ / ↓", "walk the history of what you typed here"),
+   331	        ("ctrl+r", "search that history"),
+   332	        ("esc then enter", "newline instead of submitting"),
+   333	        ("tab", "complete a /command or an @path"),
+   334	        ("shift+tab", "switch act / plan"),
+   335	        ("ctrl+o", "reprint the last shortened tool output in full"),
+   336	        ("ctrl+c", "interrupt the running turn (again at an empty prompt exits)"),
+   337	        ("ctrl+d", "end the session"),
+   338	        ("!cmd", "run a shell command with no model turn"),
+   339	        ("@path", "complete a file from this workspace"),
+   340	    ]
+   341	    width = max(len(k) for k, _ in rows)
+   342	    return CommandResult("\n".join(f"  {k:<{width}}   {v}" for k, v in rows))
+   343	
+   344	
+   345	# ── Getting the conversation out ─────────────────────────────────────────────
+   346	
+   347	
+   348	@command("export", "write this conversation to a file")
+   349	async def _export(args: str, session: "Session") -> CommandResult:
+   350	    import json
+   351	    from datetime import datetime
+   352	
+   353	    if not session.messages:
+   354	        return CommandResult("  Nothing to export yet.")
+   355	    name = args.strip() or f"forge-{datetime.now():%Y%m%d-%H%M%S}.json"
+   356	    target = session.workspace / name
+   357	    try:
+   358	        target.write_text(json.dumps(session.messages, indent=2, default=str),
+   359	                          encoding="utf-8")
+   360	    except OSError as e:
+   361	        return CommandResult(f"  Could not write {name}: {e}")
+   362	    return CommandResult(f"  Wrote {len(session.messages)} messages to {target}")
+   363	
+   364	
+   365	def ansi_dim(text: str) -> str:
+   366	    from forge.tui import ansi
+   367	    return ansi.paint(text, "dim")
+   368	
+   369	
+   370	# ── Editing, clipboard, and what is configured ───────────────────────────────
+   371	
+   372	
+   373	@command("vim", "vi keys in the input line, or back to emacs")
+   374	async def _vim(args: str, session: "Session") -> CommandResult:
+   375	    from forge.tui.input import AVAILABLE
+   376	
+   377	    bar = session.input_bar
+   378	    if bar is None or not getattr(bar, "_session", None):
+   379	        # Two different causes, and telling the operator to install a package
+   380	        # they already have sends them to fix the wrong thing.
+   381	        return CommandResult(
+   382	            "  No line editor is active, so there are no vi keys to switch to.\n"
+   383	            + ("  prompt_toolkit is installed but could not drive this terminal —\n"
+   384	               "  this happens with piped input, and under Git Bash on Windows."
+   385	               if AVAILABLE else
+   386	               "  Install the `tui` extra: pip install -e \".[tui]\""))
+   387	    want = {"on": True, "off": False}.get(args.strip().lower(), not bar.vi_mode)
+   388	    now = bar.set_vi_mode(want)
+   389	    return CommandResult(f"  Input mode: {'vi' if now else 'emacs'}")
+   390	
+   391	
+   392	def _clipboard_command() -> list[str] | None:
+   393	    """The platform's "read stdin into the clipboard" command, if there is one.
+   394	
+   395	    Done with the tool the OS already ships rather than a dependency: pyperclip
+   396	    would be a third package to install, on every platform, to move one string.
+   397	    """
+   398	    import shutil
+   399	    import sys
+   400	
+   401	    if sys.platform == "win32":
+   402	        return ["clip"]
+   403	    if sys.platform == "darwin":
+   404	        return ["pbcopy"]
+   405	    if shutil.which("wl-copy"):
+   406	        return ["wl-copy"]
+   407	    if shutil.which("xclip"):
+   408	        return ["xclip", "-selection", "clipboard"]
+   409	    if shutil.which("xsel"):
+   410	        return ["xsel", "--clipboard", "--input"]
+   411	    return None
+   412	
+   413	
+   414	def _last_assistant_text(session: "Session") -> str:
+   415	    for message in reversed(session.messages):
+   416	        if message.get("role") != "assistant":
+   417	            continue
+   418	        content = message.get("content")
+   419	        if isinstance(content, str):
+   420	            return content
+   421	        if isinstance(content, list):
+   422	            parts = [b.get("text", "") for b in content
+   423	                     if isinstance(b, dict) and b.get("type") == "text"]
+   424	            if any(parts):
+   425	                return "\n".join(p for p in parts if p)
+   426	    return ""
+   427	
+   428	
+   429	@command("copy", "put the last reply on the clipboard")
+   430	async def _copy(args: str, session: "Session") -> CommandResult:
+   431	    import subprocess
+   432	
+   433	    text = _last_assistant_text(session)
+   434	    if not text:
+   435	        return CommandResult("  Nothing to copy yet.")
+   436	    argv = _clipboard_command()
+   437	    if argv is None:
+   438	        return CommandResult(
+   439	            "  No clipboard tool found. Install wl-clipboard, xclip or xsel, "
+   440	            "or use /export to write the conversation to a file.")
+   441	    try:
+   442	        subprocess.run(argv, input=text.encode("utf-8"), check=True, timeout=10)
+   443	    except (OSError, subprocess.SubprocessError) as e:
+   444	        return CommandResult(f"  Clipboard failed ({argv[0]}): {e}")
+   445	    return CommandResult(f"  Copied {len(text)} characters.")
+   446	
+   447	
+   448	@command("mcp", "MCP servers and the tools they contributed")
+   449	async def _mcp(args: str, session: "Session") -> CommandResult:
+   450	    """MCP tools are named mcp__{server}__{tool}, so the registry itself says
+   451	    which server contributed what — no second source to fall out of step."""
+   452	    servers: dict[str, list[str]] = {}
+   453	    for name in session.tools:
+   454	        if not name.startswith("mcp__"):
+   455	            continue
+   456	        _, _, rest = name.partition("mcp__")
+   457	        server, _, tool = rest.partition("__")
+   458	        servers.setdefault(server, []).append(tool or rest)
+   459	
+   460	    if not servers:
+   461	        return CommandResult(
+   462	            "  No MCP servers connected.\n"
+   463	            "  Configure them in .forge/mcp.json; tools appear as mcp__<server>__<tool>.")
+   464	    lines = []
+   465	    for server, tools in sorted(servers.items()):
+   466	        lines.append(f"  {server}  ({len(tools)} tools)")
+   467	        lines.extend(f"      {t}" for t in sorted(tools))
+   468	    return CommandResult("\n".join(lines))
+   469	
+   470	
+   471	@command("permissions", "what is gated, and what you have allowed", "perms")
+   472	async def _permissions(args: str, session: "Session") -> CommandResult:
+   473	    allow = session.allowlist
+   474	    lines = [
+   475	        f"  mode          {session.permission_mode}"
+   476	        + ("   (every mutating operation is denied)"
+   477	           if session.permission_mode == "plan" else ""),
+   478	        f"  allowlist     {allow.path or '(not persisted)'}",
+   479	        "",
+   480	    ]
+   481	    entries = sorted(getattr(allow, "entries", ()) or ())
+   482	    if entries:
+   483	        lines.append("  Approved in advance:")
+   484	        lines.extend(f"      {e}" for e in entries)
+   485	    else:
+   486	        lines.append("  Nothing approved in advance.")
+   487	    lines += [
+   488	        "",
+   489	        "  High-impact operations — force pushes, recursive deletes, piping a",
+   490	        "  download into a shell — are always asked about and cannot be",
+   491	        "  pre-approved here. Use shift+tab for plan mode to deny every",
+   492	        "  mutation for a while.",
+   493	    ]
+   494	    return CommandResult("\n".join(lines))
+   495	
+   496	
+   497	# ── Committing and reviewing ─────────────────────────────────────────────────
+   498	
+   499	
+   500	@command("commit", "stage everything and commit")
+   501	async def _commit(args: str, session: "Session") -> CommandResult:
+   502	    """Commits through the CELL, so the work is attributed to the agent that
+   503	    did it — the Cell carries the agent's git identity (agents/config.py).
+   504	    Running this on the host instead would record the operator as the author of
+   505	    code they did not write."""
+   506	    status, ok = await _cell_git(session, "git status --porcelain")
+   507	    if not ok:
+   508	        return CommandResult(f"  {status}")
+   509	    if not status.strip():
+   510	        return CommandResult("  Nothing to commit.")
+   511	
+   512	    message = args.strip()
+   513	    if not message:
+   514	        changed = len(status.splitlines())
+   515	        return CommandResult(
+   516	            f"  {changed} file(s) changed. A commit needs a message:\n"
+   517	            "      /commit <what changed and why>\n\n"
+   518	            "  Ask the agent to write one with /review first if you want a hand.")
+   519	
+   520	    staged, ok = await _cell_git(session, "git add -A")
+   521	    if not ok:
+   522	        return CommandResult(f"  Could not stage: {staged}")
+   523	
+   524	    # -- to stop a message beginning with a dash being read as a flag, and
+   525	    # single quotes doubled so the shell keeps the message intact.
+   526	    safe = message.replace("'", "'\''")
+   527	    out, ok = await _cell_git(session, f"git commit -m '{safe}'")
+   528	    if not ok:
+   529	        return CommandResult(f"  Commit failed:\n  {out}")
+   530	
+   531	    who, _ = await _cell_git(session, "git log -1 --format=%an")
+   532	    return CommandResult(f"  {out}\n  Authored by {who.strip() or 'unknown'}.")
+   533	
+   534	
+   535	@command("review", "have the agent read its own uncommitted changes")
+   536	async def _review(args: str, session: "Session") -> CommandResult:
+   537	    """The one review that reliably does not happen is the one requiring the
+   538	    operator to write the request. This assembles it: the diff is already on
+   539	    disk, so the command supplies the ask and the agent reads what it wrote."""
+   540	    stat, ok = await _cell_git(session, "git diff --stat HEAD")
+   541	    if not ok:
+   542	        return CommandResult(f"  {stat}")
+   543	    if not stat.strip():
+   544	        return CommandResult("  Nothing to review — the working tree is clean.")
+   545	
+   546	    focus = args.strip()
+   547	    ask = (
+   548	        "Review the uncommitted changes in this repository. Run "
+   549	        "`git diff HEAD` to read them, then report: anything that looks wrong "
+   550	        "or unfinished, anything that changes behaviour beyond what was asked, "
+   551	        "and anything missing a test. Be specific — name files and lines. If it "
+   552	        "looks correct, say so plainly rather than inventing concerns."
+   553	    )
+   554	    if focus:
+   555	        ask += f"\n\nPay particular attention to: {focus}"
+   556	    return CommandResult(
+   557	        "\n".join(f"  {ln}" for ln in stat.splitlines()) + "\n", prompt=ask)
+   558	
+   559	
+   560	# ── Picking a conversation back up ───────────────────────────────────────────
+   561	
+   562	
+   563	@command("sessions", "conversations you can resume in this workspace", "ls")
+   564	async def _sessions(args: str, session: "Session") -> CommandResult:
+   565	    from forge.tui import persistence
+   566	
+   567	    entries = persistence.listing(session.workspace)
+   568	    if not entries:
+   569	        return CommandResult(
+   570	            "  No saved conversations here yet. They are written after each\n"
+   571	            "  turn, into .forge/sessions/.")
+   572	    lines = []
+   573	    for i, e in enumerate(entries, 1):
+   574	        current = "  (this one)" if e.id == session.session_id else ""
+   575	        lines.append(f"  {i:>2}. {e.title}")
+   576	        lines.append(f"      {e.agent_id} · {e.turns} turns · {e.age} · {e.id}{current}")
+   577	    lines.append("")
+   578	    lines.append("  /resume <number|id> to pick one up.")
+   579	    return CommandResult("\n".join(lines))
+   580	
+   581	
+   582	@command("resume", "continue an earlier conversation")
+   583	async def _resume(args: str, session: "Session") -> CommandResult:
+   584	    """Replaces the live transcript with a stored one.
+   585	
+   586	    The Cell, the tools and the allowlist are NOT restored — they are rebuilt
+   587	    from the current profile and the current workspace, which is the honest
+   588	    thing to do: a conversation from last week describes files as they were,
+   589	    and pretending otherwise would let the model edit against remembered text.
+   590	    Read-tracking starts empty for the same reason, so the first edit after a
+   591	    resume has to read the file again.
+   592	    """
+   593	    from forge.tui import persistence
+   594	
+   595	    entries = persistence.listing(session.workspace)
+   596	    if not entries:
+   597	        return CommandResult("  Nothing to resume in this workspace.")
+   598	
+   599	    picked = persistence.resolve(session.workspace, args)
+   600	    if picked is None:
+   601	        return CommandResult(
+   602	            f"  No session matches {args.strip()!r}. Try /sessions for the list.")
+   603	    if picked.id == session.session_id:
+   604	        return CommandResult("  That is the conversation you are already in.")
+   605	
+   606	    messages = persistence.load(session.workspace, picked.id)
+   607	    if messages is None:
+   608	        return CommandResult(f"  Could not read session {picked.id}.")
+   609	
+   610	    session.messages = messages
+   611	    session.session_id = picked.id
+   612	    session.turns = picked.turns
+   613	    session.last_truncated = None
+   614	    return CommandResult(
+   615	        f"  Resumed: {picked.title}\n"
+   616	        f"  {picked.turns} turns, {len(messages)} messages, last touched {picked.age}.\n"
+   617	        "  Files may have changed since — the agent will re-read before editing.")
+   618	
+   619	
+   620	# ── Project conventions ──────────────────────────────────────────────────────
+   621	
+   622	
+   623	@command("init", "write an AGENTS.md so the agent knows this project's conventions")
+   624	async def _init(args: str, session: "Session") -> CommandResult:
+   625	    """Asks the agent to read the repository and write down its conventions.
+   626	
+   627	    Without one, an agent rediscovers a project by being corrected: wrong test
+   628	    runner, wrong docstring style, a dependency the project deliberately
+   629	    avoids. Each costs a turn to hit and another to fix, every session.
+   630	
+   631	    The agent writes it rather than a template, because a useful conventions
+   632	    file is specific to what is actually in the repository, and a generic one
+   633	    is worse than none — it occupies the same space on every turn while saying
+   634	    nothing.
+   635	    """
+   636	    from forge.agents import conventions
+   637	
+   638	    existing = conventions.find(session.workspace)
+   639	    if existing is not None and args.strip().lower() != "force":
+   640	        rel = existing.relative_to(session.workspace)
+   641	        return CommandResult(
+   642	            f"  {rel} already exists and is loaded into every turn.\n"
+   643	            "  Edit it directly, or /init force to have the agent rewrite it.")
+   644	
+   645	    target = conventions.FILENAMES[0]
+   646	    return CommandResult(
+   647	        f"  Asking the agent to survey this repository and write {target}.\n",
+   648	        prompt=(
+   649	            f"Write {target} for this repository: the conventions someone "
+   650	            "working here has to know, which are not obvious from a single "
+   651	            "file.\n\n"
+   652	            "First look: the build and dependency files, the test setup, the "
+   653	            "directory layout, and a few representative source files. Use "
+   654	            "glob, grep and read_file — do not guess from the directory names.\n\n"
+   655	            "Then write it, covering only what you actually verified:\n"
+   656	            "- what this project is, in two sentences\n"
+   657	            "- how to install, run and test it, with the real commands\n"
+   658	            "- the layout, and where a new module of each kind belongs\n"
+   659	            "- conventions visible in the code: naming, error handling, typing, "
+   660	            "test style, anything the project does consistently and unusually\n"
+   661	            "- anything deliberately avoided, where the code shows it\n\n"
+   662	            "Be specific and short. This file is sent to the model on every "
+   663	            "turn, so a sentence that does not change what an agent would do is "
+   664	            "costing money to say nothing. Do not include a licence, a feature "
+   665	            "list, or anything you could have written without reading the repo."
+   666	        ))

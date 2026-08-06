@@ -25,6 +25,18 @@ class GraphQueryArgs(BaseModel):
     question: str = Field(description="Natural-language question or keyword to search the graph for.")
     mode: str = Field(default="bfs", description="Traversal: 'bfs' (broad) or 'dfs' (deep).")
     depth: int = Field(default=3, description="How many hops to expand from matched nodes.")
+    context_filter: list[str] | None = Field(
+        default=None,
+        description=(
+            "Restrict to edge kinds, e.g. ['call'] or ['call','import']. The sharpest "
+            "way to cut noise when a broad question drags in vendored bundles and "
+            "unrelated tests — ask for the relationship you actually mean."))
+    token_budget: int = Field(
+        default=2000,
+        description=(
+            "How much of the result to return. Raise it when the answer says it "
+            "truncated and the node you needed may be among the ones cut; a truncated "
+            "answer that hid the match is worse than a larger one."))
 
 
 class GraphQuery(Tool):
@@ -45,8 +57,11 @@ class GraphQuery(Tool):
         if (na := _no_graph(ctx)):
             return na
         try:
-            text = await ctx.graph.call("query_graph", {
-                "question": args.question, "mode": args.mode, "depth": args.depth})
+            payload = {"question": args.question, "mode": args.mode,
+                       "depth": args.depth, "token_budget": args.token_budget}
+            if args.context_filter:
+                payload["context_filter"] = args.context_filter
+            text = await ctx.graph.call("query_graph", payload)
         except Exception as e:  # noqa: BLE001
             return ToolResult(f"graph query failed: {e}", is_error=True)
         return ToolResult(text or "(no matching nodes in the graph)")
@@ -55,6 +70,14 @@ class GraphQuery(Tool):
 class GraphPathArgs(BaseModel):
     source: str = Field(description="Label of the start node (e.g. a function or class name).")
     target: str = Field(description="Label of the end node.")
+    undirected: bool = Field(
+        default=False,
+        description=(
+            "Ignore edge direction. Set this when a directed search finds nothing — "
+            "the graph is asymmetric, so A→B can be missing while B→A exists, and "
+            "'how are these two related' is usually an undirected question."))
+    max_hops: int = Field(
+        default=6, description="How far to search before giving up.")
 
 
 class GraphPath(Tool):
@@ -75,7 +98,8 @@ class GraphPath(Tool):
             return na
         try:
             text = await ctx.graph.call("shortest_path", {
-                "source": args.source, "target": args.target})
+                "source": args.source, "target": args.target,
+                "undirected": args.undirected, "max_hops": args.max_hops})
         except Exception as e:  # noqa: BLE001
             return ToolResult(f"graph path lookup failed: {e}", is_error=True)
         return ToolResult(text or "(no path found)")
