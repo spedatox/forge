@@ -309,6 +309,11 @@ async def _run_turn(prompt: str, session: Session, settings: ForgeSettings,
                     extensions, verbose: bool) -> None:
     signal = asyncio.Event()
     spinner = Spinner()
+    # The oracle has to be able to stop the live line: a permission prompt is
+    # printed and then repainted over several times a second, which erases the
+    # question and everything typed into it. A new Spinner exists per turn, so
+    # the handoff happens here rather than at Session construction.
+    session.oracle.spinner = spinner
     renderer = StreamRenderer(
         verbose=verbose, spinner=spinner,
         on_truncated=lambda name, text: setattr(session, "last_truncated", (name, text)),
