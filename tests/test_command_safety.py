@@ -173,3 +173,61 @@ def test_ordinary_work_is_not_gated_at_all(command):
     engine = PermissionEngine(mode=Mode.ACT)
     decision = engine.resolve(RunCommand(), RunCommandArgs(command=command), None)
     assert decision.allowed, f"{command!r} is ordinary work and should just run"
+
+
+# ── what a denial says beyond "no" ───────────────────────────────────────────
+
+
+def test_a_denial_tells_the_agent_what_is_legitimate_next():
+    """Without guidance the model invents its own rule, and the obvious
+    invention is the wrong one: denied read_file on a credentials path, the
+    next thing to hand is `run_command cat` on the same path. This agent has a
+    shell, so that synonym is always available."""
+    from forge.warden.dispatch import DENIAL_GUIDANCE
+
+    assert "shell command to read a path that was just refused" in DENIAL_GUIDANCE
+    assert "stop and say so" in DENIAL_GUIDANCE
+
+
+def test_the_denial_draws_the_line_at_intent_not_tooling():
+    """A blanket 'do not try anything else' would block legitimate narrowing —
+    asking for less, a different file — and an agent that cannot adapt to a
+    refusal just stalls."""
+    from forge.warden.dispatch import DENIAL_GUIDANCE
+
+    assert "same goal another way" in DENIAL_GUIDANCE
+    assert "if that way is itself permitted" in DENIAL_GUIDANCE
+
+
+def test_the_guidance_reaches_the_model_on_a_real_denial():
+    """Prose in a constant nobody sends is decoration."""
+    import asyncio
+
+    from forge.warden.dispatch import DENIAL_GUIDANCE, dispatch_tool
+    from forge.warden.permissions import Decision
+
+    class _Deny:
+        def resolve(self, tool, args, ctx):
+            return Decision("deny", "protected location", source="gate")
+
+    class _Ctx:
+        permissions = _Deny()
+        hooks: list = []
+        agent_id = "t"
+
+    from pydantic import BaseModel
+
+    class _Args(BaseModel):
+        pass
+
+    class _Tool:
+        name = "read_file"
+        Args = _Args
+
+        async def call(self, args, ctx):
+            raise AssertionError("a denied tool must never run")
+
+    out = asyncio.run(dispatch_tool({"read_file": _Tool()}, "read_file", {}, _Ctx()))
+
+    assert out.is_error
+    assert DENIAL_GUIDANCE in out.content

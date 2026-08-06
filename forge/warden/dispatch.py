@@ -22,6 +22,27 @@ from forge.warden.tool import Tool, ToolContext, ToolResult
 
 logger = logging.getLogger("forge.warden")
 
+# What a denial has to say beyond "no". Without it the model is left to invent
+# its own rule, and the obvious invention is the wrong one: denied `read_file`
+# on a credentials path, the next thing to hand is `run_command cat` on the same
+# path. That is not a workaround, it is the gate defeated by a synonym — and
+# this agent has a shell, so the synonym is always available.
+#
+# The line worth drawing is intent, not tooling: a different route to the SAME
+# permitted goal is fine, a different route to the DENIED one is not.
+DENIAL_GUIDANCE = (
+    "You may reach the same goal another way if that way is itself permitted — "
+    "a narrower command, a different file, asking for less. You must not use a "
+    "tool you still have to obtain what this denial withheld: running a shell "
+    "command to read a path that was just refused defeats the gate by synonym "
+    "rather than working around an obstacle, and the operator will see it as "
+    "the former.\n"
+    "If you genuinely cannot finish without this, stop and say so — what you "
+    "were trying to do, why it needs this, and what you would do with it. The "
+    "operator decides. An honest 'I am blocked on X' is a useful answer; "
+    "quietly doing something adjacent and reporting success is not."
+)
+
 
 async def dispatch_tool(
     tools: dict[str, Tool],
@@ -49,7 +70,9 @@ async def dispatch_tool(
     if decision.needs_ask:
         decision = await _ask(tool, name, args, decision, ctx)
     if not decision.allowed:
-        return ToolResult(f"Permission denied for {name!r}: {decision.reason}", is_error=True)
+        return ToolResult(
+            f"Permission denied for {name!r}: {decision.reason}\n\n{DENIAL_GUIDANCE}",
+            is_error=True)
     if decision.updated_args is not None:
         try:
             args = tool.Args.model_validate(decision.updated_args)
