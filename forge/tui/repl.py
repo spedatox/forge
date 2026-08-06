@@ -85,10 +85,12 @@ async def run_repl(agent: str = "optimus", workspace: Path | None = None,
             workspace=workspace)
 
         request = JobRequest(agent=cfg.agent_id, task="", repo_path=str(workspace))
-        # The REPL runs no Graphify sidecar (ToolContext below passes graph=None),
-        # so the graph tools could never have worked here — they would answer
-        # "unavailable" to a model their own descriptions told to try them first.
-        tools = without_graph_tools(await fold_providers(providers, cfg, request))
+        # The session holds the FULL set; the per-turn filter in _run_turn
+        # decides what the model sees. The REPL starts no sidecar, so the graph
+        # QUERY tools are withheld until graph_index builds one — they would
+        # otherwise answer "unavailable" to a model their own descriptions told
+        # to try them first.
+        tools = await fold_providers(providers, cfg, request)
 
         session = Session(
             cfg=cfg, model_ref=model_ref, workspace=workspace, tools=tools, cell=cell,
@@ -313,13 +315,27 @@ async def _run_turn(prompt: str, session: Session, settings: ForgeSettings,
 
     model = _build_model(session)
 
+    async def _tools() -> dict:
+        """The session's tools, minus the graph queries until a graph exists.
+
+        The REPL starts no sidecar, so those tools would answer "unavailable"
+        to a model their own descriptions told to try them first. `graph_index`
+        is always present and can build one mid-session — this re-check is what
+        lets the query tools appear afterwards instead of staying withheld for
+        a graph the agent has just created."""
+        live = ctx.graph
+        if live is not None and getattr(live, "available", False):
+            return dict(session.tools)
+        return without_graph_tools(session.tools)
+
     warden = Warden(
         system_prompt=_system_prompt(session, extensions),
-        tools=session.tools, model=model, ctx=ctx,
+        tools=await _tools(), model=model, ctx=ctx,
         max_iterations=session.cfg.max_iterations, signal=signal,
         ledger=session.ledger,
         retry_attempts=settings.retry_attempts,
         retry_base_delay=settings.retry_base_delay_s,
+        refresh_tools=_tools,
         emit=renderer,
     )
 

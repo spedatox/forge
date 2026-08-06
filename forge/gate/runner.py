@@ -126,17 +126,16 @@ async def run_job(
         # set comes through the same door as anything else would.
         providers = list(tool_providers) if tool_providers else [BuiltinToolProvider()]
 
-        # Graphify is optional and frequently absent (no binary on PATH, or no
-        # repo to index). Offering its tools anyway costs a call every time the
-        # model takes their advice to "use this FIRST to orient yourself".
-        graph_ok = graph is not None and graph.available
-
-        async def _tools() -> dict:
-            built = await fold_providers(providers, cfg, request)
-            return built if graph_ok else without_graph_tools(built)
-
-        tools = await _tools()
-
+        # Graphify is optional and often absent at the start of a job. Offering
+        # its query tools anyway costs a call every time the model takes their
+        # advice to "use this FIRST to orient yourself".
+        #
+        # Availability is read at CALL time, not captured: `graph_index` can
+        # build one mid-job, and the loop refreshes tools each iteration — so
+        # the query tools appear on the next turn rather than staying withheld
+        # for a job the agent has just made them useful for.
+        # Built BEFORE the toolset, because the toolset now asks it whether a
+        # graph is live.
         ctx = ToolContext(
             agent_id=cfg.agent_id,
             cell=cell,
@@ -151,6 +150,15 @@ async def run_job(
             oracle=oracle,                    # Seam 2
             hooks=list(hooks or []),          # Seam 3
         )
+
+        async def _tools() -> dict:
+            built = await fold_providers(providers, cfg, request)
+            live = ctx.graph
+            if live is not None and getattr(live, "available", False):
+                return built
+            return without_graph_tools(built)
+
+        tools = await _tools()
 
         # Seam 7: the profile's identity is itself a fragment, so nothing has to
         # be reshaped when a second contributor appears.

@@ -49,6 +49,10 @@ class ToolProvider(Protocol):
 #: leaving them in the list when the graph is down costs a call — often two,
 #: since the failure reads as "not indexed yet" rather than "not available
 #: here" — before it falls back to grep and gets on with the job.
+#:
+#: `graph_index` is deliberately NOT here: it is the one graph tool that works
+#: without a graph, and withholding it would leave the agent unable to create
+#: the thing whose absence caused the withholding.
 GRAPH_TOOLS = ("graph_query", "graph_path", "graph_overview")
 
 

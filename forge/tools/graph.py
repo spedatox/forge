@@ -107,3 +107,88 @@ class GraphOverview(Tool):
         except Exception as e:  # noqa: BLE001
             return ToolResult(f"graph overview failed: {e}", is_error=True)
         return ToolResult(f"{stats}\n{gods}")
+
+
+class GraphIndexArgs(BaseModel):
+    path: str = Field(
+        default=".",
+        description="Directory to index, relative to the workspace. '.' is the workspace root.")
+    refresh: bool = Field(
+        default=False,
+        description=(
+            "Re-index from scratch. Use after you have changed a lot of code and the "
+            "graph's answers have gone stale; leave false to reuse an existing index, "
+            "which is far faster."))
+
+
+class GraphIndex(Tool):
+    name = "graph_index"
+    description = (
+        "Builds (or rebuilds) the codebase graph for a directory, so the other graph "
+        "tools can answer questions about it. Use it when you start work on a repo that "
+        "has no graph yet — graph_query and the rest will tell you when there is none — "
+        "or with refresh=true after making enough changes that the graph has gone stale. "
+        "Indexing reads the whole tree and takes anywhere from seconds to a few minutes "
+        "on a large repo, so do NOT call it speculatively or once per edit; one index at "
+        "the start of real work on a codebase is the normal pattern. It is local and "
+        "costs nothing — the code is parsed on this machine and nothing is sent "
+        "anywhere. Returns the graph's size and what it now covers."
+    )
+    Args = GraphIndexArgs
+
+    # Indexing writes graphify-out/ into the tree, and two indexes racing over
+    # the same directory would fight over that file.
+    READ_ONLY = False
+    CONCURRENCY_SAFE = False
+    DESTRUCTIVE = False
+
+    async def call(self, args: GraphIndexArgs, ctx: ToolContext) -> ToolResult:
+        from pathlib import Path
+
+        from forge.graph.sidecar import GraphSidecar
+
+        root = getattr(getattr(ctx, "cell", None), "host_path", None)
+        if root is None:
+            return ToolResult("No workspace to index.", is_error=True)
+
+        root = Path(root).resolve()
+        target = (root / (args.path or ".")).resolve()
+        # Same boundary the file tools enforce: an index is a full read of the
+        # tree, so a path escaping the workspace would read the whole machine.
+        if target != root and root not in target.parents:
+            return ToolResult(
+                f"Refused: {args.path} is outside the workspace.", is_error=True)
+        if not target.is_dir():
+            return ToolResult(f"Not a directory: {args.path}", is_error=True)
+
+        if args.refresh:
+            existing = target / "graphify-out" / "graph.json"
+            try:
+                existing.unlink(missing_ok=True)
+            except OSError as e:
+                return ToolResult(f"Could not clear the old index: {e}", is_error=True)
+
+        # Replace whatever was indexed before — one graph per context, pointed
+        # at whatever the agent is actually working on.
+        previous = getattr(ctx, "graph", None)
+        if previous is not None:
+            try:
+                await previous.close()
+            except Exception:  # noqa: BLE001 — a stuck old sidecar must not block a new one
+                pass
+
+        sidecar = GraphSidecar(target)
+        if not await sidecar.start():
+            ctx.graph = None
+            return ToolResult(
+                f"Could not index {args.path}: {sidecar.unavailable_reason}. "
+                "Work from read_file and grep instead.", is_error=True)
+
+        ctx.graph = sidecar
+        try:
+            stats = await sidecar.call("graph_stats", {})
+        except Exception:  # noqa: BLE001 — indexed is the result; stats are a bonus
+            stats = ""
+        return ToolResult(
+            f"Indexed {args.path}. The graph tools can now answer questions about it.\n"
+            f"{stats}".strip())

@@ -8,7 +8,7 @@ never sees them.
 """
 from forge.tools.shell import RunCommand
 from forge.tools.files import ReadFile, WriteFile, EditFile
-from forge.tools.graph import GraphQuery, GraphPath, GraphOverview
+from forge.tools.graph import GraphQuery, GraphPath, GraphOverview, GraphIndex
 from forge.tools.search import Grep, Glob
 from forge.tools.task import TaskTool
 from forge.tools.todo import TodoWrite
@@ -32,7 +32,7 @@ WEB_TOOLS = [WebSearch, WebFetch]
 # optional extra for real work, it is how a long job avoids drowning its own
 # context. A profile that omits it simply never spawns subagents.
 CODING_TOOLS = [*NAV_TOOLS, WriteFile, EditFile, RunCommand,
-                GraphQuery, GraphPath, GraphOverview, TodoWrite,
+                GraphQuery, GraphPath, GraphOverview, GraphIndex, TodoWrite,
                 EnterWorktree, ExitWorktree, TaskTool]
 
 # Centurion's group: run security tooling in the Cell (RunCommand) and read/write
@@ -43,11 +43,11 @@ SECURITY_TOOLS = [*NAV_TOOLS, RunCommand, WriteFile, EditFile]
 
 ALL_TOOLS = {cls.name: cls for cls in [
     RunCommand, ReadFile, WriteFile, EditFile, Grep, Glob,
-    GraphQuery, GraphPath, GraphOverview, WebSearch, WebFetch, TodoWrite,
+    GraphQuery, GraphPath, GraphOverview, GraphIndex, WebSearch, WebFetch, TodoWrite,
     EnterWorktree, ExitWorktree, TaskTool,
 ]}
 
 __all__ = ["ALL_TOOLS", "NAV_TOOLS", "CODING_TOOLS", "SECURITY_TOOLS", "WEB_TOOLS",
            "RunCommand", "ReadFile", "WriteFile", "EditFile", "Grep", "Glob",
-           "GraphQuery", "GraphPath", "GraphOverview", "WebSearch", "WebFetch",
+           "GraphQuery", "GraphPath", "GraphOverview", "GraphIndex", "WebSearch", "WebFetch",
            "TodoWrite", "EnterWorktree", "ExitWorktree", "TaskTool"]

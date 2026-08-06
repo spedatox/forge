@@ -153,7 +153,94 @@ def test_the_rest_of_the_toolset_is_untouched():
     assert without_graph_tools(tools) == tools
 
 
-def test_every_graph_tool_is_covered():
-    """A fourth graph tool added later must not silently keep being offered."""
+def test_every_graph_tool_is_covered_except_the_one_that_builds_one():
+    """A new graph tool added later must not silently keep being offered when
+    there is no graph — with exactly one exception, spelled out here so it
+    stays a decision rather than an oversight."""
     from forge.tools import ALL_TOOLS
-    assert {n for n in ALL_TOOLS if n.startswith("graph_")} == set(GRAPH_TOOLS)
+
+    graph_named = {n for n in ALL_TOOLS if n.startswith("graph_")}
+    assert graph_named - set(GRAPH_TOOLS) == {"graph_index"}
+
+
+def test_the_agent_can_always_build_a_graph():
+    """Withholding graph_index would leave the agent unable to create the very
+    thing whose absence caused the withholding."""
+    tools = {name: object() for name in
+             ("read_file", "graph_index", "graph_query", "graph_overview")}
+
+    remaining = without_graph_tools(tools)
+
+    assert "graph_index" in remaining
+    assert "graph_query" not in remaining
+
+
+# ── indexing a codebase on demand ────────────────────────────────────────────
+
+
+def _graph_ctx(root):
+    from forge.warden.filestate import FileStateCache
+    from forge.warden.permissions import PermissionEngine
+    from forge.warden.tool import ToolContext
+
+    class _Cell:
+        host_path = root
+
+    return ToolContext(agent_id="t", cell=_Cell(), graph=None,
+                       files=FileStateCache(), permissions=PermissionEngine(),
+                       network_allowed=False)
+
+
+def test_indexing_outside_the_workspace_is_refused(tmp_path):
+    """An index is a full read of the tree, so an escaping path would read the
+    whole machine — the same boundary the file tools enforce."""
+    from forge.tools.graph import GraphIndex, GraphIndexArgs
+
+    result = asyncio.run(GraphIndex().call(
+        GraphIndexArgs(path="../.."), _graph_ctx(tmp_path)))
+
+    assert result.is_error and "outside the workspace" in result.content
+
+
+def test_indexing_a_file_is_refused(tmp_path):
+    from forge.tools.graph import GraphIndex, GraphIndexArgs
+    (tmp_path / "x.py").write_text("pass", encoding="utf-8")
+
+    result = asyncio.run(GraphIndex().call(
+        GraphIndexArgs(path="x.py"), _graph_ctx(tmp_path)))
+
+    assert result.is_error and "Not a directory" in result.content
+
+
+def test_a_failed_index_leaves_no_half_broken_graph(tmp_path, monkeypatch):
+    """A sidecar that failed to start must not be left on the context, or every
+    later query reports a graph that is not there."""
+    from forge.tools.graph import GraphIndex, GraphIndexArgs
+
+    class _Dead:
+        available = False
+        unavailable_reason = "graphify is not installed"
+        async def start(self): return False
+        async def close(self): ...
+
+    monkeypatch.setattr("forge.graph.sidecar.GraphSidecar", lambda *a, **k: _Dead())
+    ctx = _graph_ctx(tmp_path)
+    result = asyncio.run(GraphIndex().call(GraphIndexArgs(path="."), ctx))
+
+    assert result.is_error
+    assert "graphify is not installed" in result.content
+    assert ctx.graph is None
+    assert "read_file" in result.content        # says what to do instead
+
+
+def test_indexing_is_not_concurrency_safe():
+    """Two indexes racing over one directory fight over graphify-out/."""
+    from forge.tools.graph import GraphIndex
+    assert GraphIndex.CONCURRENCY_SAFE is False
+
+
+def test_the_description_warns_against_calling_it_per_edit():
+    """It reads the whole tree; called reflexively it dominates a session."""
+    from forge.tools.graph import GraphIndex
+    d = GraphIndex.description
+    assert "do NOT" in d and "refresh" in d.lower()
