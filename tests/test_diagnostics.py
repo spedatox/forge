@@ -35,6 +35,35 @@ def _check(tmp_path, path="."):
     return asyncio.run(Diagnostics().call(DiagnosticsArgs(path=path), _ctx(tmp_path)))
 
 
+def _has_local_checker() -> bool:
+    """Is a checker installed HERE, without fetching one?
+
+    The tool's last route is , which downloads from PyPI on first
+    use. That is the right behaviour for the tool — it turns "no checker" into
+    a working checker — and the wrong dependency for a test: these two would
+    then fail on a plane, on a locked-down runner, or any time PyPI is slow,
+    and report it as the tool being broken.
+    """
+    import shutil
+    import subprocess
+    import sys
+
+    if shutil.which("ruff"):
+        return True
+    try:
+        r = subprocess.run([sys.executable, "-m", "ruff", "--version"],
+                           capture_output=True, timeout=15)
+        return r.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+needs_checker = pytest.mark.skipif(
+    not _has_local_checker(),
+    reason="no locally installed checker; refusing to depend on a PyPI fetch")
+
+
+@needs_checker
 def test_it_catches_the_bug_that_shipped_today(tmp_path):
     """`Transition` used before it was imported. The suite caught it as a red
     run; this catches it as a line number."""
@@ -49,6 +78,7 @@ def test_it_catches_the_bug_that_shipped_today(tmp_path):
     assert "broken.py:2" in result.content        # the line, not just the file
 
 
+@needs_checker
 def test_clean_code_says_so_plainly(tmp_path):
     """Ambiguity here would train the agent to ignore the tool."""
     (tmp_path / "fine.py").write_text("def ok():\n    return 1\n", encoding="utf-8")
