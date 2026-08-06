@@ -372,12 +372,20 @@ async def _drive(warden: Warden, session: Session, prompt: str):
 
 
 def _system_prompt(session: Session, extensions) -> str:
-    from forge.agents import conventions
+    """The standalone TUI's prompt.
+
+    This path never has Mark VI on the other end, so the owner's memory comes
+    from the snapshot the peer path cached — labelled as a snapshot, and dated,
+    so stale facts are not stated as current. See forge/agents/owner_memory.py.
+    """
+    from forge.agents import conventions, owner_memory
     from forge.agents.prompt import PromptFragment, compose_system_prompt
 
     repo = conventions.fragment(session.workspace)
+    owner = owner_memory.offline_fragment()
     return compose_system_prompt([
         PromptFragment("profile", session.cfg.system_prompt),
+        *([owner] if owner else []),
         *([repo] if repo else []),
         *extensions.fragments,
     ])

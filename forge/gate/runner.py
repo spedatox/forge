@@ -12,7 +12,7 @@ import logging
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-from forge.agents import conventions
+from forge.agents import conventions, owner_memory
 from forge.agents.config import AgentConfig
 from forge.agents.prompt import PromptFragment, compose_system_prompt
 from forge.agents.registry import AgentRegistry
@@ -146,8 +146,14 @@ async def run_job(
         # A dispatched job works in the same repository an interactive one
         # does, so it gets the same conventions.
         repo_conventions = conventions.fragment(repo_path) if repo_path else None
+        # What Mark VI knows about the owner. Cached to disk on the way past so
+        # a standalone run still has it when the backend is unreachable — see
+        # forge/agents/owner_memory.py on why that cache is read-only.
+        owner_memory.remember(request.memory_block)
+        owner_fragment = owner_memory.live_fragment(request.memory_block)
         system_prompt = compose_system_prompt([
             PromptFragment("profile", cfg.system_prompt),
+            *([owner_fragment] if owner_fragment else []),
             *([repo_conventions] if repo_conventions else []),
             *(fragments or []),
         ])

@@ -41,6 +41,11 @@ class JobRequest(BaseModel):
     # Per-job model override — when set (e.g. by Heartbreaker's model picker),
     # this ref replaces the agent profile's default model for this job only.
     model_override: str | None = None
+    # What Mark VI knows about the owner — the same block it puts in its own
+    # agents' system prompts. Sent per turn rather than held here, because the
+    # backend's DB is the source of truth for it exactly as it is for history.
+    # Empty for a dispatch, or from a Mark VI too old to send it.
+    memory_block: str = ""
 
 
 class JobEvent(BaseModel):
@@ -83,6 +88,7 @@ def job_from_chat_request(frame: dict[str, Any], agent_id: str) -> JobRequest:
         # Heartbreaker's model picker / per-agent pin — None lets the profile
         # default apply; a value overrides it for this turn only.
         model_override=frame.get("model"),
+        memory_block=str(frame.get("memory_block") or ""),
     )
 
 
