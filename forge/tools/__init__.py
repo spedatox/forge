@@ -10,6 +10,7 @@ from forge.tools.shell import RunCommand
 from forge.tools.files import ReadFile, WriteFile, EditFile
 from forge.tools.graph import GraphQuery, GraphPath, GraphOverview
 from forge.tools.search import Grep, Glob
+from forge.tools.task import TaskTool
 from forge.tools.todo import TodoWrite
 from forge.tools.web import WebFetch, WebSearch
 from forge.tools.worktree import EnterWorktree, ExitWorktree
@@ -27,9 +28,12 @@ WEB_TOOLS = [WebSearch, WebFetch]
 # Reusable tool groups, referenced by agent configs via their allowlist (§2).
 # todo_write is in the coding group rather than its own: a plan is not an
 # optional capability for multi-step work, it is what keeps it coherent.
+# `task` is here rather than in a group of its own: delegating is not an
+# optional extra for real work, it is how a long job avoids drowning its own
+# context. A profile that omits it simply never spawns subagents.
 CODING_TOOLS = [*NAV_TOOLS, WriteFile, EditFile, RunCommand,
                 GraphQuery, GraphPath, GraphOverview, TodoWrite,
-                EnterWorktree, ExitWorktree]
+                EnterWorktree, ExitWorktree, TaskTool]
 
 # Centurion's group: run security tooling in the Cell (RunCommand) and read/write
 # scan output and engagement reports (files). No graph — its subject is a live
@@ -40,10 +44,10 @@ SECURITY_TOOLS = [*NAV_TOOLS, RunCommand, WriteFile, EditFile]
 ALL_TOOLS = {cls.name: cls for cls in [
     RunCommand, ReadFile, WriteFile, EditFile, Grep, Glob,
     GraphQuery, GraphPath, GraphOverview, WebSearch, WebFetch, TodoWrite,
-    EnterWorktree, ExitWorktree,
+    EnterWorktree, ExitWorktree, TaskTool,
 ]}
 
 __all__ = ["ALL_TOOLS", "NAV_TOOLS", "CODING_TOOLS", "SECURITY_TOOLS", "WEB_TOOLS",
            "RunCommand", "ReadFile", "WriteFile", "EditFile", "Grep", "Glob",
            "GraphQuery", "GraphPath", "GraphOverview", "WebSearch", "WebFetch",
-           "TodoWrite", "EnterWorktree", "ExitWorktree"]
+           "TodoWrite", "EnterWorktree", "ExitWorktree", "TaskTool"]

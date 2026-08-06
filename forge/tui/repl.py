@@ -47,6 +47,7 @@ from forge.warden.filestate import FileStateCache
 from forge.warden.ledger import TokenLedger
 from forge.warden.permissions import AllowList, Mode, PermissionEngine
 from forge.warden.state import StopReason
+from forge.warden.subagents import SubagentRunner
 from forge.warden.tool import ToolContext
 from forge.warden.toolsource import close_providers, fold_providers
 
@@ -307,13 +308,30 @@ async def _run_turn(prompt: str, session: Session, settings: ForgeSettings,
         hooks=list(extensions.hooks),
     )
 
+    model = _build_model(session)
+
     warden = Warden(
         system_prompt=_system_prompt(session, extensions),
-        tools=session.tools, model=_build_model(session), ctx=ctx,
+        tools=session.tools, model=model, ctx=ctx,
         max_iterations=session.cfg.max_iterations, signal=signal,
         ledger=session.ledger,
         retry_attempts=settings.retry_attempts,
         retry_base_delay=settings.retry_base_delay_s,
+        emit=renderer,
+    )
+
+    # Subagents get the same Cell, model, interrupt signal and ledger as the
+    # turn that spawned them — they differ only in prompt, toolset, and having
+    # their own message list. Sharing `signal` is what makes ctrl+c reach a
+    # child; sharing `ledger` is what keeps /cost honest.
+    ctx.subagents = SubagentRunner(
+        build_warden=lambda **kw: Warden(
+            model=model, ctx=ctx, signal=signal, ledger=session.ledger,
+            retry_attempts=settings.retry_attempts,
+            retry_base_delay=settings.retry_base_delay_s,
+            emit=renderer, **kw,
+        ),
+        parent_tools=lambda: session.tools,
         emit=renderer,
     )
 

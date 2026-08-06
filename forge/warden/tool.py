@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from forge.graph.sidecar import GraphSidecar
     from forge.warden.permissions import Decision, PermissionEngine
     from forge.warden.filestate import FileStateCache
+    from forge.warden.subagents import SubagentRunner
     from forge.warden.todos import TodoList
 
 
@@ -58,6 +59,13 @@ class ToolContext:
     todos: "TodoList | None" = None
     """The run's plan. Optional so an embedder that never wired one still
     constructs a context; todo_write reports its absence rather than raising."""
+
+    subagents: "SubagentRunner | None" = None
+    """How `task` spawns a child Warden. Injected rather than imported because
+    only the embedder holds the model and the tool set — keeping it here means
+    the tool boundary stays name/description/schema and nothing about spawning
+    leaks into it. Optional on the same terms as `todos`: absent, the tool says
+    so and the model does the work itself."""
     oracle: "Any | None" = None
     """Seam 2: who answers a gated action. None means nobody is reachable, which
     resolves to deny — the failure direction is fixed."""

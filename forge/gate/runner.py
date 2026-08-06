@@ -35,6 +35,7 @@ from forge.warden.todos import TodoList
 from forge.warden.ledger import TokenLedger
 from forge.warden.permissions import AllowList, Mode, PermissionEngine
 from forge.warden.state import StopReason, Terminal
+from forge.warden.subagents import SubagentRunner
 from forge.warden.tool import ToolContext
 from forge.warden.transcript import repair_transcript
 
@@ -151,6 +152,14 @@ async def run_job(
             *(fragments or []),
         ])
 
+        # One ledger for the whole job, parent and subagents alike, so a run's
+        # reported cost is what the run cost rather than what its top-level
+        # turns cost.
+        ledger = TokenLedger(context_limit=settings.context_limit,
+                             max_output_tokens=settings.max_tokens)
+        emit = lambda ev: fan(JobEvent(job_id=request.job_id, type=ev["type"],  # noqa: E731
+                                       data=ev.get("data")))
+
         warden = Warden(
             system_prompt=system_prompt,
             tools=tools,
@@ -158,13 +167,26 @@ async def run_job(
             ctx=ctx,
             max_iterations=max_iterations,
             signal=signal,
-            ledger=TokenLedger(context_limit=settings.context_limit,
-                               max_output_tokens=settings.max_tokens),
+            ledger=ledger,
             retry_attempts=settings.retry_attempts,
             retry_base_delay=settings.retry_base_delay_s,
             refresh_tools=lambda: fold_providers(providers, cfg, request),
-            emit=lambda ev: fan(JobEvent(job_id=request.job_id, type=ev["type"],
-                                         data=ev.get("data"))),
+            emit=emit,
+        )
+
+        # Seam 8: subagents. A child is the same engine with a different prompt
+        # and a narrower toolset — it shares the Cell (same workspace), the
+        # model, the interrupt signal and the ledger, and differs only in
+        # having its own message list. That difference is the entire point.
+        ctx.subagents = SubagentRunner(
+            build_warden=lambda **kw: Warden(
+                model=model, ctx=ctx, signal=signal, ledger=ledger,
+                retry_attempts=settings.retry_attempts,
+                retry_base_delay=settings.retry_base_delay_s,
+                emit=emit, **kw,
+            ),
+            parent_tools=lambda: tools,
+            emit=emit,
         )
         # A chat turn carries the full prior transcript — seed the loop with it so
         # the agent remembers the conversation. A bare dispatch has no history and
