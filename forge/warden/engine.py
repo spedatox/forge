@@ -35,6 +35,7 @@ from forge.warden.compaction import (
 from forge.warden.dispatch import dispatch_tool, to_anthropic_tool_result
 from forge.warden.ledger import TokenLedger
 from forge.warden.results import enforce_batch_budget
+from forge.warden import reminders
 from forge.warden.state import (
     ContinueReason, LoopState, StopReason, Terminal, Transition)
 from forge.warden.tool import Tool, ToolContext, ToolResult
@@ -132,6 +133,10 @@ class Warden:
         self.retry_attempts = retry_attempts
         self.retry_base_delay = retry_base_delay
         self.refresh_tools = refresh_tools
+        self._reminders = reminders.ReminderState()
+        """Per-Warden, so a subagent's observations never leak into its
+        parent's — a child that retried a failing call says nothing about
+        whether the parent is stuck."""
 
     async def run(self, task: str) -> Terminal:
         """Drive the loop for one job and return its single typed Terminal."""
@@ -235,6 +240,15 @@ class Warden:
                                           "content": res.content,
                                           # Operator-facing only; see ToolResult.display.
                                           "display": res.display}})
+            # A nudge rides with the results that earned it, so it arrives at
+            # the moment it applies rather than competing with everything that
+            # has happened since the system prompt was read.
+            reminders.observe(self._reminders, state, turn.tool_uses, results)
+            nudge = reminders.due(self._reminders)
+            if nudge:
+                result_blocks = [*result_blocks, {"type": "text", "text": nudge}]
+                logger.info("reminder_fired", extra={"iteration": state.iteration})
+
             state.messages.append({"role": "user", "content": result_blocks})
 
             # ── Boundary 2: interrupt checked after tools execute (§3). ───────
