@@ -44,6 +44,21 @@ class ToolProvider(Protocol):
         ...
 
 
+#: Tools that are useless without a running Graphify sidecar. Their own
+#: descriptions tell the model to reach for them FIRST to orient itself, so
+#: leaving them in the list when the graph is down costs a call — often two,
+#: since the failure reads as "not indexed yet" rather than "not available
+#: here" — before it falls back to grep and gets on with the job.
+GRAPH_TOOLS = ("graph_query", "graph_path", "graph_overview")
+
+
+def without_graph_tools(tools: dict[str, Tool]) -> dict[str, Tool]:
+    """The toolset minus anything that needs a graph. A tool that cannot work
+    should not be offered: the model has no way to know it will fail, and
+    discovers it only by spending a turn."""
+    return {name: tool for name, tool in tools.items() if name not in GRAPH_TOOLS}
+
+
 class BuiltinToolProvider:
     """The curated set, filtered by the profile's allowlist.
 

@@ -29,6 +29,7 @@ from forge.warden.toolsource import (
     ToolProvider,
     close_providers,
     fold_providers,
+    without_graph_tools,
 )
 from forge.warden.filestate import FileStateCache
 from forge.warden.todos import TodoList
@@ -124,7 +125,17 @@ async def run_job(
         # Seam 1: tools arrive by folding an ordered provider list. The builtin
         # set comes through the same door as anything else would.
         providers = list(tool_providers) if tool_providers else [BuiltinToolProvider()]
-        tools = await fold_providers(providers, cfg, request)
+
+        # Graphify is optional and frequently absent (no binary on PATH, or no
+        # repo to index). Offering its tools anyway costs a call every time the
+        # model takes their advice to "use this FIRST to orient yourself".
+        graph_ok = graph is not None and graph.available
+
+        async def _tools() -> dict:
+            built = await fold_providers(providers, cfg, request)
+            return built if graph_ok else without_graph_tools(built)
+
+        tools = await _tools()
 
         ctx = ToolContext(
             agent_id=cfg.agent_id,
@@ -176,7 +187,7 @@ async def run_job(
             ledger=ledger,
             retry_attempts=settings.retry_attempts,
             retry_base_delay=settings.retry_base_delay_s,
-            refresh_tools=lambda: fold_providers(providers, cfg, request),
+            refresh_tools=_tools,      # keeps the graph filter on a mid-job refresh
             emit=emit,
         )
 

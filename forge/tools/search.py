@@ -88,10 +88,19 @@ def _compile_glob(pattern: str) -> tuple["re.Pattern", bool]:
 def _walk(root: Path, glob: str | None) -> Iterator[tuple[Path, str]]:
     """Yield (path, workspace-relative posix path) for candidate files under
     `root`, pruning noise directories *during* the walk — pruning after the fact
-    still pays to descend into node_modules."""
+    still pays to descend into node_modules.
+
+    A file `root` yields just that file. "Search inside this one file" is a
+    thing anyone would ask for, and refusing it sent the caller away to re-read
+    the whole file instead."""
     matcher = basename_only = None
     if glob is not None:
         matcher, basename_only = _compile_glob(glob)
+
+    if root.is_file():
+        yield root, root.name
+        return
+
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in PRUNED_DIRS]
         for name in filenames:
@@ -167,8 +176,11 @@ class Grep(Tool):
             return ToolResult(f"Invalid regular expression {args.pattern!r}: {e}", is_error=True)
 
         base = (root / args.path).resolve()
-        if not base.is_dir():
-            return ToolResult(f"Not a directory in the workspace: {args.path}", is_error=True)
+        if not base.exists():
+            return ToolResult(
+                f"No such path in the workspace: {args.path}", is_error=True)
+        # A file is searched on its own; a directory is walked. Refusing a file
+        # here just sent the caller off to read the whole thing instead.
         # os.walk + re over a repo is blocking work; keep it off the event loop so
         # a parallel batch of searches actually overlaps.
         return await asyncio.to_thread(self._search, rx, root, base, args)
@@ -255,8 +267,17 @@ class Glob(Tool):
         if root is None:
             return _no_workspace()
         base = (root / args.path).resolve()
+        if base.is_file():
+            # Unlike grep, globbing a single file is a category error rather
+            # than a narrower search — say which it is instead of "not a
+            # directory", which reads as though the path were wrong.
+            return ToolResult(
+                f"{args.path} is a file, and glob searches a directory tree. "
+                "Pass the folder to search, or use grep to look inside this file.",
+                is_error=True)
         if not base.is_dir():
-            return ToolResult(f"Not a directory in the workspace: {args.path}", is_error=True)
+            return ToolResult(
+                f"No such directory in the workspace: {args.path}", is_error=True)
         return await asyncio.to_thread(self._glob, root, base, args.pattern)
 
     def _glob(self, root: Path, base: Path, pattern: str) -> ToolResult:

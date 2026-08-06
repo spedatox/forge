@@ -21,10 +21,45 @@ from pathlib import Path
 from forge.cell.base import Cell, CellPolicy, CommandResult
 
 
+def _posix_shell() -> str | None:
+    """A POSIX shell on this machine, or None if there is genuinely none.
+
+    On Windows `create_subprocess_shell` means cmd.exe, so `mkdir -p`,
+    `ls`, `rm -rf` and every other command an agent writes by reflex fail with
+    "The syntax of the command is incorrect." The agent then has to guess which
+    dialect it is talking to, on a per-command basis, from an error that does
+    not say.
+
+    Git ships bash on essentially every Windows dev machine, so preferring it
+    means one shell everywhere: the same command works on the owner's laptop
+    and on the Linux server, and nothing about the agent's habits has to fork
+    by platform. Falling back to cmd.exe is deliberate — a working cmd is
+    better than refusing to run at all — but the caller is told which it got.
+    """
+    if os.name != "nt":
+        return None
+    found = shutil.which("bash")
+    if found:
+        return found
+    for candidate in (r"C:\Program Files\Git\bin\bash.exe",
+                      r"C:\Program Files (x86)\Git\bin\bash.exe"):
+        if Path(candidate).exists():
+            return candidate
+    return None
+
+
 class SubprocessCell(Cell):
     def __init__(self, workspace: Path, policy: CellPolicy) -> None:
         self.workspace = Path(workspace).resolve()
         self.policy = policy
+        self._shell = _posix_shell()
+
+    @property
+    def shell_dialect(self) -> str:
+        """"posix" or "cmd" — what commands sent here are parsed as."""
+        if os.name != "nt" or self._shell:
+            return "posix"
+        return "cmd"
 
     @property
     def workdir(self) -> Path:
@@ -71,13 +106,26 @@ class SubprocessCell(Cell):
         t = self._clamp_timeout(timeout)
         self.workdir.mkdir(parents=True, exist_ok=True)
         try:
-            proc = await asyncio.create_subprocess_shell(
-                command,
-                cwd=str(self.workdir),
-                env=self._base_env(env),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
+            if self._shell:
+                # `bash -c` rather than the platform shell, so one dialect works
+                # on the laptop and the server alike. exec_ (not shell_) because
+                # the command is bash's argument, not something for cmd to parse
+                # first — otherwise cmd mangles the quoting on the way through.
+                proc = await asyncio.create_subprocess_exec(
+                    self._shell, "-c", command,
+                    cwd=str(self.workdir),
+                    env=self._base_env(env),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+            else:
+                proc = await asyncio.create_subprocess_shell(
+                    command,
+                    cwd=str(self.workdir),
+                    env=self._base_env(env),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
         except OSError as e:
             return CommandResult("", f"failed to launch command: {e}", 1, False)
         try:

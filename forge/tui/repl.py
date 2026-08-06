@@ -49,7 +49,7 @@ from forge.warden.permissions import AllowList, Mode, PermissionEngine
 from forge.warden.state import StopReason
 from forge.warden.subagents import SubagentRunner
 from forge.warden.tool import ToolContext
-from forge.warden.toolsource import close_providers, fold_providers
+from forge.warden.toolsource import close_providers, fold_providers, without_graph_tools
 
 
 async def run_repl(agent: str = "optimus", workspace: Path | None = None,
@@ -85,7 +85,10 @@ async def run_repl(agent: str = "optimus", workspace: Path | None = None,
             workspace=workspace)
 
         request = JobRequest(agent=cfg.agent_id, task="", repo_path=str(workspace))
-        tools = await fold_providers(providers, cfg, request)
+        # The REPL runs no Graphify sidecar (ToolContext below passes graph=None),
+        # so the graph tools could never have worked here — they would answer
+        # "unavailable" to a model their own descriptions told to try them first.
+        tools = without_graph_tools(await fold_providers(providers, cfg, request))
 
         session = Session(
             cfg=cfg, model_ref=model_ref, workspace=workspace, tools=tools, cell=cell,
