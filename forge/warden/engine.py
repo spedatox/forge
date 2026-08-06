@@ -35,7 +35,8 @@ from forge.warden.compaction import (
 from forge.warden.dispatch import dispatch_tool, to_anthropic_tool_result
 from forge.warden.ledger import TokenLedger
 from forge.warden.results import enforce_batch_budget
-from forge.warden.state import ContinueReason, LoopState, StopReason, Terminal
+from forge.warden.state import (
+    ContinueReason, LoopState, StopReason, Terminal, Transition)
 from forge.warden.tool import Tool, ToolContext, ToolResult
 
 logger = logging.getLogger("forge.warden")
@@ -51,6 +52,24 @@ MAX_TOOL_CONCURRENCY = 10
 # a 529 spike; past that it is an outage and failing loudly beats hanging on.
 RETRY_ATTEMPTS = 4
 RETRY_BASE_DELAY_S = 2.0
+
+# Tools that change the tree, and tools that can prove a change works. The
+# split is what lets the loop notice "wrote code, ran nothing" — the one
+# failure a model cannot catch in itself, because from the inside a plan it
+# never executed is indistinguishable from one it did.
+_WRITE_TOOLS = frozenset({"write_file", "edit_file"})
+_CHECK_TOOLS = frozenset({"run_command"})
+
+_VERIFY_PROMPT = (
+    "Before you finish: you changed files this turn and did not run anything "
+    "afterwards, so nothing here has been shown to work.\n\n"
+    "Run whatever actually exercises the change — the test suite, the specific "
+    "test, the program, a type check, an import. Then report what you saw.\n\n"
+    "If there is genuinely nothing to run, say so explicitly and say why, and "
+    "tell the operator what you did NOT verify. An honest 'I could not check "
+    "this' is useful; a confident summary of untested work is the single most "
+    "expensive thing you can hand back, because it looks exactly like success."
+)
 _MAX_BACKOFF_S = 30.0
 
 
@@ -193,10 +212,17 @@ class Warden:
 
             # ── Stop condition: no tool-use blocks → the model is done (§3). ──
             if not turn.tool_uses:
+                if self._unverified(state):
+                    state.verification_nudged = True
+                    state.messages.append({"role": "user", "content": _VERIFY_PROMPT})
+                    state.transitions.append(
+                        Transition(ContinueReason.NEXT_TURN, "unverified changes"))
+                    continue
                 await self.emit({"type": "done", "data": turn.text})
                 return self._terminal(StopReason.COMPLETED, state)
 
             # ── Observe: run the requested tools (parallel only where safe). ──
+            self._note_tools(state, turn.tool_uses)
             results = await self._run_tools(turn.tool_uses)
             # Each result is already within its own cap; this is the batch as a
             # whole, which no single-result cap can see.
@@ -500,6 +526,34 @@ class Warden:
             tu.id, ToolResult("[interrupted before execution]", is_error=True))
             for tu in tool_uses]
         return {"role": "user", "content": blocks}
+
+    def _note_tools(self, state: LoopState, tool_uses) -> None:
+        """Record what kind of work this lap did, for the verification check.
+
+        Only two facts matter: whether a file changed, and whether anything was
+        RUN afterwards. Both are stamped with the iteration, because tests that
+        passed before an edit say nothing about the edit.
+        """
+        for tu in tool_uses:
+            if tu.name in _WRITE_TOOLS:
+                state.wrote_at = state.iteration
+            elif tu.name in _CHECK_TOOLS:
+                state.checked_at = state.iteration
+
+    def _unverified(self, state: LoopState) -> bool:
+        """Did this job change code and then stop without running anything?
+
+        The most expensive failure in an agentic loop is not a crash — it is a
+        confident report of work that was never executed. The model has no way
+        to notice it skipped that step; the loop does, because it watched.
+
+        Asked once. A second ask is nagging, and the answer to "why didn't you
+        run it" is sometimes "there is nothing to run", which the loop cannot
+        know but the agent can say.
+        """
+        return (state.wrote_at > 0
+                and state.checked_at < state.wrote_at
+                and not state.verification_nudged)
 
     async def _wind_down(self, state: LoopState) -> Terminal:
         """The ceiling is reached. Ask for a handover instead of cutting the

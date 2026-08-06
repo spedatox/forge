@@ -63,6 +63,19 @@ class LoopState:
     and charging it against the ceiling lets a flaky provider quietly shorten
     every job it touches. Never reset — the budget it protects is cumulative."""
 
+    wrote_at: int = 0
+    """Iteration of the most recent change to a file. 0 = nothing written yet."""
+
+    checked_at: int = 0
+    """Iteration of the most recent command run — the only evidence the loop has
+    that a change was tried rather than assumed. Compared against `wrote_at`:
+    running the tests BEFORE the edit proves nothing about the edit."""
+
+    verification_nudged: bool = False
+    """Whether the loop has already asked, once, for the work to be checked.
+    Once per job: a second ask is nagging, and an agent that declined the first
+    has a reason the loop cannot see."""
+
     compact_failures: int = 0
     """Consecutive failed attempts to reclaim context. Past a small limit Forge
     stops trying: a context that cannot be reduced will not become reducible on
