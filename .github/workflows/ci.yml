@@ -111,26 +111,43 @@ jobs:
 
             # The unit file is version-controlled. Sync it only when it
             # actually differs, so an unchanged deploy does not daemon-reload.
+            # Every root action below is spelled out verbatim because
+            # /etc/sudoers.d/forgedeploy matches on the exact command line —
+            # this account has no general sudo and no shell through it.
             if ! cmp -s deploy/forge@.service /etc/systemd/system/forge@.service; then
               echo "unit file changed — installing"
-              cp deploy/forge@.service /etc/systemd/system/forge@.service
-              systemctl daemon-reload
+              sudo /usr/bin/install -m 644 -o root -g root \
+                /opt/forge-mk1/deploy/forge@.service /etc/systemd/system/forge@.service
+              sudo /usr/bin/systemctl daemon-reload
             fi
 
             # Restarting drops whatever a peer was mid-way through. That is the
             # accepted cost of staying current; the alternative is drifting 26
             # commits behind again. Peers reconnect to Igor with capped backoff.
-            systemctl restart forge@optimus forge@centurion
+            sudo /usr/bin/systemctl restart forge@optimus forge@centurion
 
             # Restart=always would happily mask a crash loop, so give it long
             # enough to fall over (RestartSec=5s) and then insist it is up.
+            # Unrolled rather than looped: the sudoers entries are per-unit, so
+            # a variable here would not match and every check would fail closed.
+            # `|| true` on each probe is load-bearing: is-active exits non-zero
+            # for a dead unit, and under `set -e` that would abort the script
+            # before it printed WHY the deploy failed.
             sleep 12
-            for unit in forge@optimus forge@centurion; do
-              if ! systemctl is-active --quiet "$unit"; then
-                echo "::error::$unit is not active after deploy"
-                systemctl status "$unit" --no-pager -l | tail -30
-                exit 1
-              fi
-            done
+            optimus="$(sudo /usr/bin/systemctl is-active forge@optimus || true)"
+            centurion="$(sudo /usr/bin/systemctl is-active forge@centurion || true)"
+
+            failed=0
+            if [ "$optimus" != "active" ]; then
+              echo "::error::forge@optimus is $optimus after deploy"
+              sudo /usr/bin/systemctl status forge@optimus --no-pager -l | tail -30 || true
+              failed=1
+            fi
+            if [ "$centurion" != "active" ]; then
+              echo "::error::forge@centurion is $centurion after deploy"
+              sudo /usr/bin/systemctl status forge@centurion --no-pager -l | tail -30 || true
+              failed=1
+            fi
+            [ "$failed" -eq 0 ] || exit 1
 
             echo "deployed $(git log -1 --format='%h %s')"
