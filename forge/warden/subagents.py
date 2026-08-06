@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Awaitable, Callable
@@ -46,6 +47,39 @@ MAX_CONCURRENT = 4
 # large repo gets cut off and reported as partial, which is the failure that
 # makes delegation not worth the round trip.
 SUBAGENT_MAX_ITERATIONS = 60
+
+
+_VERDICT = re.compile(r"^\s*VERDICT:\s*(PASS|FAIL|PARTIAL)\s*$",
+                      re.MULTILINE | re.IGNORECASE)
+_RAN_A_COMMAND = re.compile(r"^\s*RAN\b", re.MULTILINE | re.IGNORECASE)
+
+
+def audit_verification(report: str) -> str:
+    """Refuse a PASS that shows no evidence.
+
+    The prompt asks for a command and its output behind every check. Asking is
+    not enough — "verification avoidance" is precisely the habit of narrating a
+    check instead of running it, and a report that says PASS with reasoning
+    underneath reads exactly like one that ran something.
+
+    So the claim is checked mechanically: a PASS with no `RAN` line never
+    reaches the parent as a PASS. This cannot tell whether the commands were
+    the RIGHT ones — only that some were run — but it closes the failure that
+    costs the most, which is a confident all-clear nobody executed.
+    """
+    match = _VERDICT.search(report or "")
+    if match is None:
+        return (report + "\n\n[harness] This report has no VERDICT line, so it "
+                "is not a verification result. Treat the work as unverified.")
+    if match.group(1).upper() != "PASS":
+        return report
+    if _RAN_A_COMMAND.search(report or ""):
+        return report
+    return (report + "\n\n[harness] REJECTED: this PASS cites no command it "
+            "ran. Reading code is not verification, and a check with no "
+            "command is a skip reported as a pass. Treat the work as "
+            "UNVERIFIED and check it yourself, or delegate again asking "
+            "explicitly for the commands and their output.")
 
 
 @dataclass(frozen=True)
@@ -84,6 +118,65 @@ find something, say so plainly — "no caller of this function exists in the \
 repo" is a useful, actionable answer, and a guess dressed as a finding is not.
 - Be brief. Your caller is paying context for every word you return, which is \
 the entire reason you were given a separate one.
+"""
+
+_VERIFY_PROMPT = """\
+You verify that work actually functions. Your job is not to confirm it works — \
+it is to try to break it.
+
+Two things go wrong when an agent verifies its own work, and both were observed \
+in this repository:
+
+1. **Rationalising an anomaly.** A tool reported 22 import edges across 76 \
+modules. The true number was 175. Instead of asking whether 22 was plausible, \
+the implementer wrote a paragraph explaining why it made sense — and shipped \
+"0 cycles found" as a clean result. If you catch yourself writing an \
+explanation for a surprising number, stop and measure it against something \
+independent instead.
+
+2. **Trusting the implementer's tests.** They were written by an agent, against \
+fixtures that agent chose, and they may only exercise the cases it already \
+handled. A green suite is context, not evidence. Run it, note it, then go and \
+verify the thing itself.
+
+You cannot edit anything. That is deliberate: your value is the report, and an \
+agent that fixes as it goes stops looking.
+
+## How to verify
+
+- Exercise the change directly — run the program, call the endpoint, invoke the \
+CLI with real input. Reading the code is not verification.
+- Check outputs against what they SHOULD be, not merely that they exist. \
+"Returned 200" and "did not crash" are not results.
+- Sanity-check every count and every total. Ask what the number ought to be \
+roughly, get that figure independently, and compare. This one habit would have \
+caught the failure above in a single command.
+- Then try to break it: empty input, zero, one, a very large value, unicode, a \
+malformed file, the same operation twice, an ID that does not exist.
+
+## What your report must contain
+
+For each check, all three of these:
+
+    CHECK   what you are verifying
+    RAN     the exact command
+    SAW     the actual output, pasted, not paraphrased
+    RESULT  PASS, or FAIL with expected vs actual
+
+A check with no command is not a PASS — it is a skip, and reporting it as a \
+PASS is worse than omitting it. At least one of your checks must be an attempt \
+to break the thing, and you must report what happened even if it held.
+
+End with exactly one line, on its own:
+
+    VERDICT: PASS       everything you checked worked
+    VERDICT: FAIL       something is broken — say what, with the output
+    VERDICT: PARTIAL    you could not check something for an ENVIRONMENTAL \
+reason (no test runner, tool missing, server would not start)
+
+PARTIAL is not for "I am unsure". If you were able to run the check, decide. \
+Before saying FAIL, check the behaviour is not deliberate — comments, \
+AGENTS.md, or defensive code elsewhere may make it correct.
 """
 
 _REVIEW_PROMPT = """\
@@ -144,6 +237,23 @@ BUILT_INS: dict[str, SubagentSpec] = {
         system_prompt=_EXPLORE_PROMPT,
         tool_names=_EXPLORE_TOOLS,
         read_only=True,
+    ),
+    "verify": SubagentSpec(
+        name="verify",
+        description=(
+            "Independently checks that work you just finished actually "
+            "functions, by running it rather than reading it, and returns a "
+            "PASS/FAIL/PARTIAL verdict with the commands and output that "
+            "back it. Use it before you report a non-trivial change as done — "
+            "it starts from a fresh context, so unlike you it has not spent "
+            "the last hour becoming convinced the code is right, and it is "
+            "told to sanity-check counts and totals rather than accept them. "
+            "It cannot edit anything, so it will not quietly fix what it "
+            "finds. Do NOT use it in place of running your own tests, and do "
+            "not use it on a one-line change where the cost exceeds the doubt."
+        ),
+        system_prompt=_VERIFY_PROMPT,
+        tool_names=_EXPLORE_TOOLS + ("run_command", "diagnostics"),
     ),
     "review": SubagentSpec(
         name="review",
@@ -329,4 +439,8 @@ class SubagentRunner:
             return await _finish(
                 f"The {spec.name} subagent finished without reporting anything. "
                 "Treat this as no result, not as success.", True)
+        if spec.name == "verify":
+            # A verifier's whole product is a claim about reality, so the claim
+            # is checked before it reaches the parent (see audit_verification).
+            text = audit_verification(text)
         return await _finish(text, False)
