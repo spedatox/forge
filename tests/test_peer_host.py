@@ -72,12 +72,20 @@ def test_a_hostname_lookup_failure_is_not_fatal(monkeypatch):
 ])
 def test_the_platform_decides_which_paths_suit_us(system, expected, monkeypatch):
     """Mark VI refuses a path malformed for the peer it is aimed at, so this is
-    what stops `C:\\Users\\...` reaching a Linux peer."""
+    what stops a drive-letter path reaching a Linux peer."""
     monkeypatch.setattr(host.platform, "system", lambda: system)
     assert host.platform_id() == expected
 
 
 # ── Advertised roots ─────────────────────────────────────────────────────────
+# The fixtures must suit the machine the test runs on. FORGE_ROOTS is split on
+# os.pathsep, which is ";" on Windows precisely BECAUSE a Windows path contains
+# a colon. Joining Windows paths with a Linux runner's ":" separator therefore
+# produces a string that correctly splits into four fragments — the code
+# behaving properly and the fixture being wrong. It only surfaced on CI because
+# the dev machine is the one platform where the wrong fixture passes.
+ROOT_A, ROOT_B = ((r"C:\repos", r"D:\work") if os.name == "nt"
+                  else ("/srv/repos", "/srv/work"))
 
 
 def test_no_roots_means_any_path_for_this_platform(monkeypatch):
@@ -88,15 +96,23 @@ def test_no_roots_means_any_path_for_this_platform(monkeypatch):
 
 
 def test_roots_are_read_from_the_environment(monkeypatch):
-    monkeypatch.setenv("FORGE_ROOTS", os.pathsep.join([r"C:\repos", r"D:\work"]))
-    assert host.roots() == [r"C:\repos", r"D:\work"]
+    monkeypatch.setenv("FORGE_ROOTS", os.pathsep.join([ROOT_A, ROOT_B]))
+    assert host.roots() == [ROOT_A, ROOT_B]
 
 
 def test_blank_entries_are_dropped(monkeypatch):
     """A trailing separator is the normal way to write one of these by hand,
     and an empty root would advertise a claim on everything."""
-    monkeypatch.setenv("FORGE_ROOTS", r"C:\repos" + os.pathsep + os.pathsep + "  ")
-    assert host.roots() == [r"C:\repos"]
+    monkeypatch.setenv("FORGE_ROOTS", ROOT_A + os.pathsep + os.pathsep + "  ")
+    assert host.roots() == [ROOT_A]
+
+
+def test_a_root_keeps_its_drive_letter(monkeypatch):
+    """The separator is per-platform for exactly this reason: split a Windows
+    path on ":" and `C:\\repos` becomes `C` and `\\repos`, which advertises two
+    roots that do not exist and claims none of the one that does."""
+    monkeypatch.setenv("FORGE_ROOTS", ROOT_A)
+    assert host.roots() == [ROOT_A]
 
 
 # ── The handshake actually carries them ──────────────────────────────────────
@@ -112,7 +128,7 @@ def test_the_registration_frame_identifies_the_machine(monkeypatch):
     from forge.gate.peer import ForgePeer
 
     monkeypatch.setenv("FORGE_HOST", "arel-pc")
-    monkeypatch.setenv("FORGE_ROOTS", r"C:\repos")
+    monkeypatch.setenv("FORGE_ROOTS", ROOT_A)
     monkeypatch.setattr(host.platform, "system", lambda: "Windows")
 
     registry = AgentRegistry.load()
@@ -131,4 +147,4 @@ def test_the_registration_frame_identifies_the_machine(monkeypatch):
     assert frame["agent_id"] == "optimus"      # ONE agent...
     assert frame["host"] == "arel-pc"          # ...on a named machine
     assert frame["platform"] == "windows"
-    assert frame["roots"] == [r"C:\repos"]
+    assert frame["roots"] == [ROOT_A]
