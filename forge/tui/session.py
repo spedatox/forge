@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from forge.agents.config import AgentConfig
-from forge.tui import ansi
+from forge.tui import ansi, keys
 from forge.warden.ledger import TokenLedger
 from forge.warden.oracle import Answer
 from forge.warden.permissions import AllowList
@@ -76,39 +76,111 @@ class TerminalOracle:
             return Answer(True)
         if choice == "always":
             return Answer(True, remember=True)
+        if choice == "redirect":
+            note = await asyncio.to_thread(_ask_redirect)
+            if note:
+                return Answer(False, note=note)
         return Answer(False, note="declined at the prompt")
 
 
-# The three answers, in the order they should be offered: the safe one first,
-# so a reflexive Enter approves this call only and never grants a standing
-# permission the operator did not read.
 _CHOICES = (
-    ("once", "y", "allow this one call"),
-    ("always", "a", "allow this exact action from now on"),
-    ("no", "n", "refuse it"),
+    ("once", "y", "Yes"),
+    ("always", "a", "Yes, and don't ask again for this exact action"),
+    ("no", "n", "No"),
+    ("redirect", "t", "No, and tell it what to do instead"),
 )
+"""The answers, in Claude Code's order and shape, for two reasons it gets right.
+
+**The scope lives in the label.** "always" told the operator nothing about what
+they were granting. Forge records the EXACT action string and never a pattern
+(see dispatch.py), so the label says exactly that — a standing permission is
+the one answer nobody should agree to from a word they had to interpret.
+
+**Refusing is not the end of the exchange.** A bare "no" tells the agent it may
+not do this and nothing about what to do instead, so it guesses — and the most
+likely guess is a way around the refusal. `Answer.note` already reaches the
+model ("The operator declined this: <note>"), so the channel existed; nothing
+was ever put into it.
+"""
 
 
 async def _choose() -> str | None:
     """The operator's answer, or None if they interrupted.
 
-    Typed, not a cursor menu. A selectable list would be better — `a` grants a
-    STANDING permission and is reachable by the least deliberate keystroke on
-    the row — but a menu needs the line editor, and the line editor is exactly
-    what does not build in every terminal this runs in. A half-drawn selector
-    that silently falls back to typing is worse than an honest prompt: it looks
-    like arrows work, and they do not.
-
-    So the typed prompt is made good instead. Each option carries its
-    consequence on the row, so it is read while choosing rather than recalled
-    from a legend, and input is accepted generously.
+    Arrows where the console can give us keys one at a time, a typed word where
+    it cannot. Deliberately NOT built on prompt_toolkit: that is what powers
+    the completion menu, and it is also what fails to construct in some
+    terminals — which is the situation a permission prompt most needs to
+    survive. Reading the console directly (forge/tui/keys.py) means the
+    selector works in terminals where the line editor does not.
     """
+    if keys.available():
+        picked = await asyncio.to_thread(_select_sync)
+        if picked is not None:
+            return picked
     return await asyncio.to_thread(_typed_sync)
+
+
+def _render_options(cursor: int) -> None:
+    for n, (name, key, blurb) in enumerate(_CHOICES):
+        if n == cursor:
+            ansi.write("  " + ansi.paint(f"❯ {name:<7} {blurb}", "bold", "cyan"))
+        else:
+            ansi.write("    " + ansi.paint(f"{name:<7} {blurb}", "grey"))
+
+
+def _select_sync() -> str | None:
+    """An arrow-driven list, repainted in place.
+
+    Refusal is the cursor's starting position. On a gate, the answer reached by
+    the least deliberate keystroke should be the one that does nothing.
+    """
+    cursor = len(_CHOICES) - 1          # "no"
+    _render_options(cursor)
+    ansi.write(ansi.paint("    ↑↓ to choose · enter to confirm · or type y/a/n/t",
+                          "dim"))
+
+    while True:
+        key = keys.read_key()
+        if key is None:                 # console stopped cooperating mid-prompt
+            return None
+        if key == keys.CANCEL:
+            return "no"
+        if key == keys.ENTER:
+            return _CHOICES[cursor][0]
+        if key in ("y", "a", "n", "t"):
+            return {"y": "once", "a": "always",
+                    "n": "no", "t": "redirect"}[key]
+        if key in (keys.UP, keys.DOWN):
+            cursor = (cursor + (-1 if key == keys.UP else 1)) % len(_CHOICES)
+            # Reclaim the rows just drawn and paint the new selection over
+            # them, so the list updates rather than accumulating copies.
+            if not ansi.rewind(len(_CHOICES) + 1):
+                return None             # cannot repaint: fall back to typing
+            _render_options(cursor)
+            ansi.write(ansi.paint(
+                "    ↑↓ to choose · enter to confirm · or type y/a/n/t", "dim"))
+
+
+def _ask_redirect() -> str:
+    """What the operator wants done instead.
+
+    Reaches the model as the denial's reason, so it is an instruction and not a
+    complaint — "read the .env.example instead" turns a dead end into the next
+    step. Empty falls back to a plain refusal rather than sending the model an
+    empty string to interpret.
+    """
+    ansi.write(ansi.paint("    what should it do instead?", "grey"))
+    try:
+        said = input("    > ").strip()
+    except (EOFError, KeyboardInterrupt):
+        return ""
+    return f"the operator refused and said: {said}" if said else ""
 
 
 def _typed_sync() -> str | None:
     for name, key, blurb in _CHOICES:
-        ansi.write(ansi.paint(f"    {key}  {name:<7} {blurb}", "grey"))
+        ansi.write(ansi.paint(f"    {key}  {blurb}", "grey"))
     try:
         raw = input("    > ").strip().lower()
     except (EOFError, KeyboardInterrupt):
@@ -121,6 +193,8 @@ def _typed_sync() -> str | None:
         return "once"
     if raw in ("a", "always", "2"):
         return "always"
+    if raw in ("t", "tell", "redirect", "4"):
+        return "redirect"
     return "no"
 
 

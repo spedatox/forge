@@ -104,5 +104,90 @@ def test_each_option_carries_its_consequence(monkeypatch, capsys):
     asyncio.run(TerminalOracle().ask("read_file", ".env", "protected"))
 
     out = capsys.readouterr().out
-    assert "allow this one call" in out
-    assert "from now on" in out
+    assert "Yes" in out
+    assert "don't ask again" in out       # the scope, not just a word
+    assert "tell it what to do instead" in out
+
+
+# ── inherited from Claude Code's permission dialog ───────────────────────────
+
+
+def test_the_standing_permission_says_what_it_grants():
+    """"always" told the operator nothing about scope. Forge records the EXACT
+    action string and never a pattern, so the label says exactly that — a
+    standing permission is the one answer nobody should agree to from a word
+    they had to interpret."""
+    from forge.tui.session import _CHOICES
+
+    always = next(c for c in _CHOICES if c[0] == "always")
+    assert "don't ask again" in always[2]
+    assert "this exact action" in always[2]
+
+
+def test_refusing_can_carry_an_instruction(monkeypatch):
+    """A bare "no" tells the agent it may not do this and nothing about what to
+    do instead, so it guesses — and the likeliest guess is a way around the
+    refusal."""
+    answers = iter(["t", "read .env.example instead"])
+    monkeypatch.setattr("builtins.input", lambda *a: next(answers))
+
+    answer = asyncio.run(TerminalOracle().ask("read_file", ".env", "protected"))
+
+    assert answer.approved is False
+    assert "read .env.example instead" in answer.note
+
+
+def test_that_instruction_reaches_the_model():
+    """The channel already existed — dispatch puts answer.note into the denial
+    the model reads. Nothing was ever put into it."""
+    import inspect
+
+    from forge.warden import dispatch
+
+    src = inspect.getsource(dispatch)
+    assert "The operator declined this: {answer.note" in src
+
+
+def test_an_empty_redirect_is_just_a_refusal(monkeypatch):
+    """Sending the model an empty string to interpret is worse than sending it
+    the plain refusal."""
+    answers = iter(["t", "   "])
+    monkeypatch.setattr("builtins.input", lambda *a: next(answers))
+
+    answer = asyncio.run(TerminalOracle().ask("t", "k", "r"))
+
+    assert answer.approved is False
+    assert answer.note == "declined at the prompt"
+
+
+def test_the_cursor_starts_on_refuse():
+    """On a gate, the answer reached by the least deliberate keystroke should
+    be the one that does nothing."""
+    from forge.tui.session import _CHOICES
+
+    assert _CHOICES[-1][0] == "redirect"
+    # the plain refusal sits immediately before it, and the selector opens
+    # on the last index, so Enter never approves by accident
+    assert "no" in {c[0] for c in _CHOICES}
+
+
+def test_arrow_keys_are_read_without_the_line_editor():
+    """The completion menu is prompt_toolkit, which is exactly what fails to
+    build in some terminals — the situation a permission prompt most needs to
+    survive."""
+    from forge.tui import keys
+
+    assert hasattr(keys, "read_key") and hasattr(keys, "available")
+    import ast
+    import inspect
+
+    tree = ast.parse(inspect.getsource(keys))
+    imported = {
+        (n.module or "") for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)
+    } | {
+        a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names
+    }
+    # Checked against the imports, not the source text — the module docstring
+    # names prompt_toolkit precisely to explain why it is NOT used, and a grep
+    # would fail on the explanation.
+    assert not any("prompt_toolkit" in m for m in imported)

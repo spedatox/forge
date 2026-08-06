@@ -37,6 +37,9 @@ GLYPHS = {
     "█": "#", "░": ".", "⏎": "\n", "…": "...", "·": ".", "›": ">", "═": "=",
     "◐": "|", "◓": "/", "◑": "-", "◒": "\\",
     "—": "-", "↑": "^", "↓": "v", "⇄": "/", "⏶": "^",
+    # The permission selector's cursor. ">" rather than "*" because the row it
+    # marks is a choice being pointed at, not an item in a list.
+    "❯": ">",
 }
 
 
