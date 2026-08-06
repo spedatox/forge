@@ -133,10 +133,7 @@ class Warden:
             # Retry laps are excluded: the ceiling bounds work attempted, and a
             # provider having a bad afternoon must not silently shorten the job.
             if state.iteration - state.retries >= self.max_iterations:
-                await self.emit({"type": "error",
-                                 "data": f"reached max_iterations ({self.max_iterations})"})
-                return self._terminal(StopReason.MAX_ITERATIONS, state,
-                                      error=f"max_iterations ({self.max_iterations}) reached")
+                return await self._wind_down(state)
             state.iteration += 1
 
             # ── Make room, before spending a turn discovering there is none. ──
@@ -503,6 +500,61 @@ class Warden:
             tu.id, ToolResult("[interrupted before execution]", is_error=True))
             for tu in tool_uses]
         return {"role": "user", "content": blocks}
+
+    async def _wind_down(self, state: LoopState) -> Terminal:
+        """The ceiling is reached. Ask for a handover instead of cutting the
+        head off mid-thought.
+
+        Stopping dead at the boundary throws away the one thing worth having:
+        the agent knows what it just did, what is half-finished, and what it was
+        about to do next, and nobody else does. Returning nothing forces the
+        operator to reconstruct that by reading a scrolled-past transcript, or —
+        more often — to start the job again.
+
+        So it gets one final turn with NO tools. That is what makes this safe
+        rather than a ceiling that quietly does not hold: it cannot edit another
+        file, run another command, or extend the run. It can only write the
+        handover. Exactly one such turn happens, because the loop is left
+        immediately afterwards either way.
+        """
+        await self.emit({"type": "chunk", "data":
+                         f"\n[reached the {self.max_iterations}-iteration ceiling "
+                         "— asking for a handover]\n"})
+
+        # An operator who already pressed ctrl+c is not waiting for a summary;
+        # spending another model call on one is the wrong answer to "stop".
+        if self.signal.is_set():
+            return self._terminal(
+                StopReason.MAX_ITERATIONS, state,
+                error=f"max_iterations ({self.max_iterations}) reached")
+
+        state.messages.append({"role": "user", "content": (
+            f"You have reached this run's ceiling of {self.max_iterations} "
+            "tool-using turns, so this is your last turn and you have no tools "
+            "in it. Do not plan further work here — write the handover instead. "
+            "State what you actually changed and where (file and line), what is "
+            "half-finished and in what state it was left, and the single next "
+            "step someone picking this up should take. Be specific about what "
+            "you did NOT get to: an unfinished job described accurately is "
+            "resumable, and one described optimistically is worse than useless."
+        )})
+
+        turn = await self._stream_turn(state, [])      # no tools: it can only talk
+        if turn.error is not None:
+            logger.warning("wind_down_failed", exc_info=turn.error)
+            return self._terminal(
+                StopReason.MAX_ITERATIONS, state,
+                error=f"max_iterations ({self.max_iterations}) reached")
+
+        if turn.usage is not None:
+            state.ledger.record(turn.usage)
+        if turn.text:
+            state.last_text = turn.text
+            state.messages.append(turn.assistant_message())
+
+        return self._terminal(
+            StopReason.MAX_ITERATIONS, state,
+            error=f"max_iterations ({self.max_iterations}) reached")
 
     def _aborted(self, state: LoopState) -> Terminal:
         state.messages.append(
