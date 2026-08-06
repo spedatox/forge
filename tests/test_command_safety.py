@@ -133,3 +133,43 @@ def test_a_flag_that_raises_fails_closed():
     engine = PermissionEngine(mode=Mode.ACT)
     decision = engine.resolve(Broken(), Empty(), None)
     assert not decision.allowed and "destructive" in decision.reason
+
+
+# ── Nothing is banned; risky things ask ──────────────────────────────────────
+# The operator's rule, stated 2026-08-06: "Optimus can do anything. It can't do
+# risky stuff without asking me, that's all." Encoded here because the failure
+# mode is quiet — a gate that hardens from `ask` into `deny` still looks safe,
+# still passes a smoke test, and simply makes the agent useless at the exact
+# moments it was most needed.
+
+
+@pytest.mark.parametrize("command", [
+    "git push --force origin main",
+    "git reset --hard HEAD~3",
+    "git clean -fd",
+    "rm -rf build",
+    "sudo systemctl restart nginx",
+])
+def test_a_risky_command_asks_rather_than_refuses(command):
+    engine = PermissionEngine(mode=Mode.ACT)
+    decision = engine.resolve(RunCommand(), RunCommandArgs(command=command), None)
+
+    assert decision.needs_ask, f"{command!r} should stop for a decision"
+    assert decision.behavior != "deny", (
+        f"{command!r} is REFUSED outright. The gate is a checkpoint, not a wall: "
+        "the operator decides, the harness does not decide for them."
+    )
+
+
+@pytest.mark.parametrize("command", [
+    "git push origin main",          # ordinary push: outward-facing, reversible
+    "git merge feature/x",           # local, and undoable
+    "git commit -m 'fix the retry'",
+    "npm install",
+])
+def test_ordinary_work_is_not_gated_at_all(command):
+    """A gate that fires on routine work trains the operator to approve without
+    reading, which costs exactly the protection the gate exists to provide."""
+    engine = PermissionEngine(mode=Mode.ACT)
+    decision = engine.resolve(RunCommand(), RunCommandArgs(command=command), None)
+    assert decision.allowed, f"{command!r} is ordinary work and should just run"

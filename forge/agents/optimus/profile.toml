@@ -48,8 +48,21 @@ permission_mode = "act"
 max_iterations = 400
 
 [cell]
-# Default posture: no outbound network unless a job explicitly requests it (§8).
-allow_network = false
+# A coding agent needs the network, and denying it does not make it safer — it
+# makes it useless in a way that reads as a bug. `git push`, `git fetch`, a
+# package install and most test suites all fail at the socket, and the error
+# they produce ("Failed to connect to github.com port 443") looks like a broken
+# machine rather than a policy.
+#
+# What actually bounds this agent is not the socket: it is the permission gate
+# on irreversible commands, the worktree/root confinement, and the fact that
+# the Cell's environment has every provider key stripped from it before any
+# command runs (see subprocess_cell._base_env) — so code executed here cannot
+# exfiltrate the credentials that pay for the model.
+#
+# The default for a NEW agent stays false. This is a considered exception for
+# the one profile whose whole job is working in real repositories.
+allow_network = true
 cpus = 2.0
 memory_mb = 2048
 timeout_s = 120
