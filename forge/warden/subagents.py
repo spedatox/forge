@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Awaitable, Callable
 
@@ -202,8 +203,8 @@ class SubagentRunner:
     _slots: asyncio.Semaphore = field(
         default_factory=lambda: asyncio.Semaphore(MAX_CONCURRENT))
 
-    def _scoped_emit(self, spec: SubagentSpec):
-        """The child's events, translated so they cannot speak for the parent.
+    def _scoped_emit(self, spec: SubagentSpec, run_id: str, label: str):
+        """The child's events, re-channelled so they cannot speak for the parent.
 
         A child Warden is a full loop and emits everything a parent does —
         including `done` when it finishes. Handing it the parent's emit meant
@@ -212,32 +213,41 @@ class SubagentRunner:
         finished, while the parent carried on working invisibly and still
         billing the provider.
 
-        So two kinds of frame never leave a child:
+        Nothing from a child now appears on the parent's channel. It all moves
+        to `subagent`, a channel of its own that carries the run's id so a
+        client can group several concurrent delegations, and which no consumer
+        treats as terminal. That is what lets the work be SHOWN — in its own
+        panel, foldable, ignorable — without it ever being mistaken for the
+        answer.
 
-        - **Terminal frames** (`done`, `error`). Only the parent's turn ends the
-          turn. A child's failure is already reported to the parent as a tool
-          result it can read and react to.
-        - **Prose** (`chunk`). The child's report is the tool result, not the
-          answer. Streaming it as if the parent had said it is what made a
-          subagent's write-up appear as Optimus's reply.
-
-        Tool activity IS forwarded, tagged with the subagent's name, because
-        otherwise a long delegation looks like a hang.
+        Dropping these frames entirely (the first fix) stopped the bug and cost
+        the operator all visibility of a delegation that can run for minutes.
         """
         async def emit(event: dict) -> None:
             if self.emit is None:
                 return
             etype = str(event.get("type", ""))
-            if etype in ("done", "error", "chunk"):
-                return
-            if etype in ("tool", "tool_result"):
+            payload: dict = {"id": run_id, "agent": spec.name, "label": label}
+
+            if etype == "chunk":
+                payload |= {"phase": "text", "text": event.get("data") or ""}
+            elif etype == "tool":
                 data = dict(event.get("data") or {})
-                name = data.get("name")
-                if name:
-                    data["name"] = f"{spec.name}:{name}"
-                await self.emit({"type": etype, "data": data})
+                payload |= {"phase": "tool", "tool": data.get("name"),
+                            "input": data.get("input")}
+            elif etype == "tool_result":
+                data = dict(event.get("data") or {})
+                payload |= {"phase": "tool_result", "tool_use_id": data.get("id"),
+                            "result": data.get("result")}
+            elif etype in ("done", "error"):
+                # Deliberately NOT forwarded as done/error: a child ending is
+                # not the turn ending. `finished` is reported by run() once the
+                # Terminal has been classified, which knows more than this does.
                 return
-            await self.emit(event)      # usage and the like: same ledger, real cost
+            else:
+                return                  # usage and the like stay harness-side
+
+            await self.emit({"type": "subagent", "data": payload})
 
         return emit
 
@@ -252,7 +262,12 @@ class SubagentRunner:
         chosen.pop("task", None)
         return chosen
 
-    async def run(self, spec: SubagentSpec, prompt: str) -> tuple[str, bool]:
+    async def _announce(self, payload: dict) -> None:
+        if self.emit is not None:
+            await self.emit({"type": "subagent", "data": payload})
+
+    async def run(self, spec: SubagentSpec, prompt: str,
+                  label: str = "") -> tuple[str, bool]:
         """Run one subagent to completion. Returns (report, is_error).
 
         Every failure comes back as a value rather than an exception: the
@@ -266,40 +281,52 @@ class SubagentRunner:
             return (f"The '{spec.name}' subagent has none of the tools it needs "
                     "in this deployment, so it was not run."), True
 
+        run_id = uuid.uuid4().hex[:12]
+        base = {"id": run_id, "agent": spec.name, "label": label}
+
+        async def _finish(report: str, failed: bool) -> tuple[str, bool]:
+            """Close the panel with the same text the parent receives, so what
+            the operator reads and what the model reads cannot disagree."""
+            await self._announce(base | {"phase": "finished", "ok": not failed,
+                                         "report": report})
+            return report, failed
+
         async with self._slots:
-            # No "subagent running" chunk. That was prose in the parent's answer
-            # for something the parent did not say — the same fault as streaming
-            # the child's report. The parent's own `task` tool call already
-            # shows in the transcript, and the child's tool rows arrive tagged.
+            await self._announce(base | {"phase": "started", "prompt": prompt})
             warden = self.build_warden(
                 system_prompt=spec.system_prompt,
                 tools=tools,
                 max_iterations=SUBAGENT_MAX_ITERATIONS,
-                emit=self._scoped_emit(spec),
+                emit=self._scoped_emit(spec, run_id, label),
             )
             try:
                 terminal = await warden.run(prompt)
             except Exception as e:  # noqa: BLE001 — a child must not kill the parent
                 logger.exception("subagent_failed")
-                return f"The {spec.name} subagent failed: {type(e).__name__}: {e}", True
+                return await _finish(
+                    f"The {spec.name} subagent failed: {type(e).__name__}: {e}", True)
 
         text = (terminal.final_text or "").strip()
         reason = terminal.reason
 
         if reason == StopReason.ERROR:
-            return f"The {spec.name} subagent errored: {terminal.error or 'no detail'}", True
+            return await _finish(
+                f"The {spec.name} subagent errored: {terminal.error or 'no detail'}", True)
         if reason == StopReason.ABORTED:
             # The operator interrupted. Report the partial rather than dressing
             # an abort up as a finding.
-            return (f"The {spec.name} subagent was interrupted before it "
-                    f"finished. Partial findings:\n\n{text or '(nothing yet)'}"), True
+            return await _finish(
+                f"The {spec.name} subagent was interrupted before it finished. "
+                f"Partial findings:\n\n{text or '(nothing yet)'}", True)
         if reason == StopReason.MAX_ITERATIONS:
             # Partial work is still work — hand back whatever it reached, and
             # say it is partial so the parent does not treat it as complete.
-            return (f"The {spec.name} subagent hit its {SUBAGENT_MAX_ITERATIONS}"
-                    "-iteration ceiling before finishing. Partial findings:\n\n"
-                    f"{text or '(it produced no report)'}"), False
+            return await _finish(
+                f"The {spec.name} subagent hit its {SUBAGENT_MAX_ITERATIONS}"
+                "-iteration ceiling before finishing. Partial findings:\n\n"
+                f"{text or '(it produced no report)'}", False)
         if not text:
-            return (f"The {spec.name} subagent finished without reporting "
-                    "anything. Treat this as no result, not as success."), True
-        return text, False
+            return await _finish(
+                f"The {spec.name} subagent finished without reporting anything. "
+                "Treat this as no result, not as success.", True)
+        return await _finish(text, False)

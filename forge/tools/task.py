@@ -85,6 +85,9 @@ class TaskTool(Tool):
                 is_error=True,
             )
 
-        report, failed = await runner.run(spec, prompt)
+        # The operator's label for this delegation. It rides the subagent
+        # events so a panel can title the run with what it is FOR, rather than
+        # with a specialist's name and an opaque id.
+        report, failed = await runner.run(spec, prompt, label=args.description)
         return ToolResult(content=report, is_error=failed,
                           display=f"{spec.name}: {args.description}")

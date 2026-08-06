@@ -261,12 +261,14 @@ def test_task_is_a_coding_tool_and_not_a_security_one():
     assert ALL_TOOLS["task"] is TaskTool
 
 
-# ── A subagent must not speak for the parent ─────────────────────────────────
+
+# ── A subagent gets its own channel, never the parent's ──────────────────────
 
 
-def _emitting_runner(child_events):
-    """A runner whose child emits `child_events`, capturing what escapes."""
+def _emitting_runner(child_events, terminal=None):
+    """A runner whose child emits `child_events`; captures what reaches the parent."""
     escaped: list[dict] = []
+    terminal = terminal or Terminal(reason=StopReason.COMPLETED, final_text="report")
 
     async def parent_emit(ev):
         escaped.append(ev)
@@ -278,60 +280,115 @@ def _emitting_runner(child_events):
         async def run(self, task):
             for ev in child_events:
                 await self._emit(ev)
-            return Terminal(reason=StopReason.COMPLETED, final_text="report")
+            return terminal
 
-    r = SubagentRunner(build_warden=lambda **kw: _Emitting(**kw),
-                       parent_tools=lambda: dict(PARENT_TOOLS),
-                       emit=parent_emit)
-    return r, escaped
+    runner = SubagentRunner(build_warden=lambda **kw: _Emitting(**kw),
+                            parent_tools=lambda: dict(PARENT_TOOLS),
+                            emit=parent_emit)
+    return runner, escaped
 
 
-def test_a_finished_subagent_does_not_end_the_parents_turn():
-    """The bug, 2026-08-06: a child Warden emits `done` when it completes, and
-    it was handed the parent's emit. That frame reached the client, which reads
+def _phases(escaped):
+    return [e["data"]["phase"] for e in escaped if e["type"] == "subagent"]
+
+
+def test_nothing_a_child_emits_lands_on_the_parents_channel():
+    """The bug, 2026-08-06: a child Warden emits `done` when it completes and
+    was handed the parent's emit. That frame reached the client, which reads
     `done` as end-of-turn — Heartbreaker closed the stream the moment the
-    subagent finished, while the parent kept working invisibly and kept
-    billing the provider."""
-    runner, escaped = _emitting_runner([{"type": "done", "data": "child done"}])
+    subagent finished while the parent kept working and kept billing."""
+    runner, escaped = _emitting_runner([
+        {"type": "chunk", "data": "I looked at 40 files"},
+        {"type": "done", "data": "child done"},
+        {"type": "error", "data": "child broke"},
+    ])
     asyncio.run(runner.run(BUILT_INS["explore"], "find it"))
 
-    assert not any(e["type"] == "done" for e in escaped), \
-        "a subagent's `done` escaped and will close the parent's stream"
+    assert {e["type"] for e in escaped} == {"subagent"}, \
+        "a child event reached the parent's own channel"
 
 
-def test_a_failing_subagent_does_not_error_the_parents_turn():
-    """Its failure is reported to the parent as a tool result it can react to."""
-    runner, escaped = _emitting_runner([{"type": "error", "data": "child broke"}])
-    asyncio.run(runner.run(BUILT_INS["general"], "do it"))
-
-    assert not any(e["type"] == "error" for e in escaped)
-
-
-def test_a_subagents_prose_is_not_the_parents_answer():
-    """Its report comes back as the tool result. Streaming it as prose is what
-    made a subagent's write-up appear as Optimus's own reply."""
-    runner, escaped = _emitting_runner([{"type": "chunk", "data": "I looked at 40 files..."}])
+def test_the_panel_gets_an_opening_and_a_closing_frame():
+    """So a client has something to create the panel with, and something to
+    close it with — otherwise a delegation that dies leaves a spinner forever."""
+    runner, escaped = _emitting_runner([])
     asyncio.run(runner.run(BUILT_INS["explore"], "find it"))
 
-    assert not any(e["type"] == "chunk" for e in escaped)
+    assert _phases(escaped)[0] == "started"
+    assert _phases(escaped)[-1] == "finished"
 
 
-def test_tool_activity_is_forwarded_so_it_does_not_look_hung():
-    """A two-minute delegation with no output is indistinguishable from a
-    crash, so the work IS shown — tagged, so it is not mistaken for the
-    parent's own calls."""
+def test_the_childs_work_is_visible_rather_than_discarded():
+    """Dropping it entirely stopped the bug and cost all visibility of a
+    delegation that can run for minutes."""
+    runner, escaped = _emitting_runner([
+        {"type": "chunk", "data": "searching"},
+        {"type": "tool", "data": {"id": "t1", "name": "grep", "input": {}}},
+        {"type": "tool_result", "data": {"id": "t1", "result": "3 hits"}},
+    ])
+    asyncio.run(runner.run(BUILT_INS["explore"], "find it"))
+
+    assert _phases(escaped) == ["started", "text", "tool", "tool_result", "finished"]
+    tool = [e["data"] for e in escaped if e["data"]["phase"] == "tool"][0]
+    assert tool["tool"] == "grep"
+
+
+def test_every_frame_carries_the_run_id_so_panels_do_not_merge():
+    """Several delegations run at once; without an id their rows interleave
+    into one unreadable stream."""
     runner, escaped = _emitting_runner([
         {"type": "tool", "data": {"id": "t1", "name": "grep", "input": {}}},
     ])
     asyncio.run(runner.run(BUILT_INS["explore"], "find it"))
 
-    assert len(escaped) == 1
-    assert escaped[0]["type"] == "tool"
-    assert escaped[0]["data"]["name"] == "explore:grep"
+    ids = {e["data"]["id"] for e in escaped}
+    assert len(ids) == 1 and next(iter(ids))
 
 
-def test_the_report_still_reaches_the_caller_as_a_value():
-    """Silencing the stream must not silence the result."""
-    runner, _ = _emitting_runner([{"type": "done", "data": "x"}])
-    report, failed = asyncio.run(runner.run(BUILT_INS["explore"], "find it"))
-    assert report == "report" and not failed
+def test_the_panel_is_titled_with_what_the_work_is_for():
+    """A specialist's name and an opaque id tell the operator nothing."""
+    runner, escaped = _emitting_runner([])
+    asyncio.run(runner.run(BUILT_INS["explore"], "find it",
+                           label="find the sidebar toggle"))
+
+    assert all(e["data"]["label"] == "find the sidebar toggle" for e in escaped)
+
+
+def test_the_closing_frame_carries_the_same_text_the_parent_gets():
+    """What the operator reads and what the model reads must not disagree."""
+    runner, escaped = _emitting_runner([])
+    report, _ = asyncio.run(runner.run(BUILT_INS["explore"], "find it"))
+
+    closing = [e["data"] for e in escaped if e["data"]["phase"] == "finished"][0]
+    assert closing["report"] == report
+    assert closing["ok"] is True
+
+
+def test_a_failed_delegation_closes_its_panel_as_failed():
+    """A panel left open on a crashed subagent reads as still running."""
+    runner, escaped = _emitting_runner(
+        [], terminal=Terminal(reason=StopReason.ERROR, error="context overflow"))
+    asyncio.run(runner.run(BUILT_INS["general"], "do it"))
+
+    closing = [e["data"] for e in escaped if e["data"]["phase"] == "finished"][0]
+    assert closing["ok"] is False and "context overflow" in closing["report"]
+
+
+def test_a_crashed_child_still_closes_its_panel():
+    """An exception is the case most likely to leave a spinner running."""
+    escaped: list[dict] = []
+
+    async def parent_emit(ev):
+        escaped.append(ev)
+
+    def build(**kw):
+        class _Boom:
+            async def run(self, task):
+                raise RuntimeError("model stream died")
+        return _Boom()
+
+    runner = SubagentRunner(build_warden=build, parent_tools=lambda: PARENT_TOOLS,
+                            emit=parent_emit)
+    asyncio.run(runner.run(BUILT_INS["explore"], "find it"))
+
+    assert _phases(escaped)[-1] == "finished"

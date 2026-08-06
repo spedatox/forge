@@ -45,7 +45,11 @@ _HEARTBEAT_S = 30.0
 # visibility this class of hang otherwise lacks). It never aborts the run.
 _CHAT_SILENCE_LOG_S = 250.0
 # chat_event types Mark VI's ExternalAgentProxy understands (its _EVENT_MAP).
-_CHAT_FORWARD = frozenset({"chunk", "tool", "tool_result", "done", "error"})
+_CHAT_FORWARD = frozenset({"chunk", "tool", "tool_result", "done", "error",
+                           # A delegation's own activity, on its own channel so
+                           # a client can show it in a panel of its own rather
+                           # than mixed into the answer (forge/warden/subagents).
+                           "subagent"})
 
 
 class ForgePeer:
