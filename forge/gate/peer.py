@@ -3,7 +3,7 @@
 Connects to Mark VI's agents WebSocket as the agent it was launched as and speaks
 the backend's existing protocol:
 
-    → agent_register (agent_id, capabilities, model_preference)
+    → agent_register (agent_id, capabilities, model_preference, host/platform/roots)
     → heartbeat (periodic)
     ← task_dispatch {task_id, from, task, cwd}     → run one job → task_result
     ← chat_request  {chat_id, history, cwd, ...}   → run one job → chat_event stream
@@ -24,6 +24,7 @@ import uuid
 from typing import Any
 
 from forge.agents.config import AgentConfig
+from forge.gate import host
 from forge.config import ForgeSettings
 from forge.gate.protocol import (JobEvent, job_event_to_chat_event,
                                  job_from_chat_request, job_from_task_dispatch)
@@ -156,7 +157,19 @@ class ForgePeer:
             "capabilities": list(self.cfg.tool_names),
             "status": "online",
             "model_preference": self.cfg.model_ref,
+            # Which MACHINE this peer speaks for. Mark VI keys connections by
+            # (agent_id, host), so without these two peers of the same agent
+            # share one slot and the second to connect silently evicts the
+            # first — see forge/gate/host.py for the day that happened.
+            "host": host.host_id(),
+            "platform": host.platform_id(),
+            "roots": host.roots(),
         })
+        logger.info(
+            "peer_registering",
+            extra={"agent": self.cfg.agent_id, "host": host.host_id(),
+                   "platform": host.platform_id(), "roots": host.roots()},
+        )
 
     async def _heartbeat(self) -> None:
         while True:
