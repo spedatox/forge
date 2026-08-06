@@ -220,19 +220,27 @@ class InputBar:
         self._on_cycle_mode = on_cycle_mode
         self._on_toggle_expand = on_toggle_expand
         self._session = None
+        self.degraded_reason = "" if AVAILABLE else "prompt_toolkit is not installed"
         if AVAILABLE:
             try:
                 self._session = self._build_session()
-            except Exception:  # noqa: BLE001
+            except Exception as first:  # noqa: BLE001
                 # prompt_toolkit's create_output() checks sys.platform: on
                 # Windows it uses Win32Output, which needs a real Windows
                 # console buffer. Under Git Bash / MSYS2 / Cygwin the terminal
                 # is a PTY that speaks ANSI — Win32Output raises
                 # NoConsoleScreenBufferError, but Vt100_Output works. Retry
-                # with that before giving up. Everything else (pipe, dumb
-                # TERM, no tty) degrades to plain input() — the line editor is
-                # a convenience, reading a line is not.
+                # with that before giving up.
                 self._session = self._build_session_vt100()
+                if self._session is None:
+                    # Everything else (a pipe, a dumb TERM, no tty) degrades to
+                    # plain input() — the line editor is a convenience, reading
+                    # a line is not. But it degrades LOUDLY now. Silently
+                    # falling back cost a whole investigation: the prompt looks
+                    # identical, so the missing dropdown reads as a completion
+                    # bug rather than as "there is no line editor here", and
+                    # multi-line paste breaks for the same invisible reason.
+                    self.degraded_reason = f"{type(first).__name__}: {first}"
 
     # ── construction ─────────────────────────────────────────────────────────
 

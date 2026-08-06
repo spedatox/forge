@@ -485,3 +485,38 @@ def test_a_vt100_retry_actually_enters_its_session(monkeypatch, tmp_path):
 
     src = inspect.getsource(InputBar._build_session_vt100)   # noqa: SLF001
     assert "__enter__" in src, "the app session is constructed but never entered"
+
+
+def test_a_working_editor_says_nothing(tmp_path):
+    """A warning that fires when everything is fine is noise, and noise is
+    what gets ignored the day it matters."""
+    assert _headless_bar(tmp_path).degraded_reason == ""
+
+
+def test_falling_back_to_plain_input_is_announced(monkeypatch, tmp_path):
+    """It used to degrade in silence. The prompt looks identical either way, so
+    the missing dropdown reads as a completion bug rather than as "there is no
+    line editor here" — and multi-line paste breaks for the same invisible
+    reason. One symptom, one cause, and no way to see it."""
+    def _boom(self):
+        raise RuntimeError("NoConsoleScreenBufferError: no Windows console")
+
+    monkeypatch.setattr(InputBar, "_build_session", _boom, raising=True)
+    bar = InputBar(tmp_path, command_help())
+
+    assert bar._session is None                      # noqa: SLF001
+    assert "no Windows console" in bar.degraded_reason
+
+
+def test_the_reason_names_the_cause_not_just_the_effect(monkeypatch, tmp_path):
+    """"Something went wrong" sends the reader looking in the wrong place —
+    which is exactly what happened: the terminal was blamed on the sandbox's
+    TERM rather than on the console the operator was actually using."""
+    def _boom(self):
+        raise ValueError("distinctive marker")
+
+    monkeypatch.setattr(InputBar, "_build_session", _boom, raising=True)
+    bar = InputBar(tmp_path, command_help())
+
+    assert "ValueError" in bar.degraded_reason
+    assert "distinctive marker" in bar.degraded_reason

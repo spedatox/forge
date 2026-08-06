@@ -116,6 +116,17 @@ async def _loop(session: Session, settings: ForgeSettings, extensions, verbose: 
                    on_toggle_expand=lambda: _expand_last(session),
                    hint=lambda: _hint_line(session))
     session.input_bar = bar
+    if bar.degraded_reason:
+        # Say it once, at the top, where it explains the session you are about
+        # to have. Without this the prompt looks completely normal and simply
+        # does less: no completion menu on `/` or `@`, and a multi-line paste
+        # submits at its first newline instead of arriving whole.
+        ansi.write(ansi.paint(
+            "  ! no line editor here — completions and multi-line paste are off",
+            "yellow"))
+        ansi.write(ansi.paint(f"    {bar.degraded_reason}", "dim"))
+        ansi.write(ansi.paint(
+            "    put long input in a file and ask me to read it", "dim"))
     while True:
         # Rule and counters CLOSE the exchange above them, then a blank line,
         # then the prompt. Sitting directly on top of the prompt they read as

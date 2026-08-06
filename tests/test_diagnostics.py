@@ -36,25 +36,35 @@ def _check(tmp_path, path="."):
 
 
 def _has_local_checker() -> bool:
-    """Is a checker installed HERE, without fetching one?
+    """Is a checker reachable FROM THE CELL, without fetching one?
 
-    The tool's last route is , which downloads from PyPI on first
-    use. That is the right behaviour for the tool — it turns "no checker" into
-    a working checker — and the wrong dependency for a test: these two would
-    then fail on a plane, on a locked-down runner, or any time PyPI is slow,
-    and report it as the tool being broken.
+    Asked through a Cell rather than with shutil.which, because those are two
+    different environments: the Cell runs its own shell with its own PATH and
+    does not see the harness's venv. Checking the harness answered "ruff is
+    here", the tool then failed to find it in the Cell and fell through to the
+    `uvx` route, which downloads from PyPI — so the test failed on a slow fetch
+    and blamed the tool.
+
+    That is the same fault as reading a sandbox's TERM and drawing a conclusion
+    about the operator's terminal. Measure where the code actually runs.
     """
-    import shutil
-    import subprocess
-    import sys
+    import tempfile
 
-    if shutil.which("ruff"):
-        return True
+    from forge.cell.base import CellPolicy
+    from forge.cell.subprocess_cell import SubprocessCell
+
+    async def probe() -> bool:
+        with tempfile.TemporaryDirectory() as d:
+            cell = SubprocessCell(Path(d), CellPolicy())
+            await cell.start()
+            for cmd in ("ruff --version", "python -m ruff --version"):
+                if (await cell.run(cmd)).exit_code == 0:
+                    return True
+        return False
+
     try:
-        r = subprocess.run([sys.executable, "-m", "ruff", "--version"],
-                           capture_output=True, timeout=15)
-        return r.returncode == 0
-    except (OSError, subprocess.SubprocessError):
+        return asyncio.run(probe())
+    except Exception:      # noqa: BLE001 — no checker is a skip, not an error
         return False
 
 
