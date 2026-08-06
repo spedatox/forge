@@ -224,15 +224,15 @@ class InputBar:
             try:
                 self._session = self._build_session()
             except Exception:  # noqa: BLE001
-                # Importing prompt_toolkit is not the same as being able to
-                # drive this terminal. Under Git Bash on Windows it imports
-                # fine and then raises NoConsoleScreenBufferError on
-                # construction, because TERM says xterm while the console is
-                # Win32. There are other variants — a pipe, a dumb TERM, no
-                # tty at all — and none of them are worth crashing the session
-                # over: the line editor is a convenience, reading a line is
-                # not. Fall back and keep going.
-                self._session = None
+                # prompt_toolkit's create_output() checks sys.platform: on
+                # Windows it uses Win32Output, which needs a real Windows
+                # console buffer. Under Git Bash / MSYS2 / Cygwin the terminal
+                # is a PTY that speaks ANSI — Win32Output raises
+                # NoConsoleScreenBufferError, but Vt100_Output works. Retry
+                # with that before giving up. Everything else (pipe, dumb
+                # TERM, no tty) degrades to plain input() — the line editor is
+                # a convenience, reading a line is not.
+                self._session = self._build_session_vt100()
 
     # ── construction ─────────────────────────────────────────────────────────
 
@@ -303,13 +303,26 @@ class InputBar:
             # whole reason to show a menu rather than expect recall.
             complete_style=CompleteStyle.COLUMN,
             style=_MENU_STYLE,
-            # Zero, not one. This pre-allocates rows so the display does not
-            # jump when a menu opens; at eight (the default) that is a
-            # permanent block of dead space, and at one the menu has room
-            # for a single entry and reads as broken. At zero nothing is
-            # reserved and the menu takes the space it needs when it opens,
-            # which costs a small shift and buys back both.
-            reserve_space_for_menu=0,
+            # This is not cosmetic padding — it is what makes the menu appear
+            # at all. prompt_toolkit only guarantees the layout a minimum
+            # height when this is NON-ZERO:
+            #
+            #     space = self.reserve_space_for_menu
+            #     if space and not get_app().is_done:      # 0 is falsy
+            #         return Dimension(min=space)
+            #     return Dimension()
+            #
+            # I set it to 0 to kill the dead space at the default of 8, and
+            # took the menu with it. It survived review because a menu with
+            # room below the cursor still draws: on a fresh screen the prompt
+            # sits mid-terminal and completion looked fine. Once the transcript
+            # grew and the prompt reached the last row, there was nowhere to
+            # draw and it silently stopped — which is exactly how it was
+            # reported, as having "stopped working".
+            #
+            # So it reserves what the menu can actually use, and no more: the
+            # same cap the completer yields.
+            reserve_space_for_menu=MAX_SUGGESTIONS,
             # NOT enable_history_search. prompt_toolkit disables
             # complete_while_typing whenever it is on — its own source says
             # so — and that silently cost the menu that appears on `/` and
@@ -319,6 +332,41 @@ class InputBar:
             multiline=False,                  # esc+enter inserts; enter submits
             mouse_support=False,              # keep native terminal selection
         )
+
+    def _build_session_vt100(self):
+        """Retry with explicit Vt100_Output for Git Bash / MSYS2 on Windows.
+
+        prompt_toolkit's create_output() routes to Win32Output when
+        sys.platform is 'win32', but terminals like mintty (Git Bash) and
+        MSYS2 provide a PTY that speaks ANSI escapes — there is no Windows
+        console buffer to attach to.  Creating an app session with an explicit
+        Vt100_Output before building the PromptSession lets prompt_toolkit
+        drive the terminal it actually has."""
+        import sys
+
+        from prompt_toolkit.application import create_app_session
+        from prompt_toolkit.output.vt100 import Vt100_Output
+
+        try:
+            out = Vt100_Output.from_pty(sys.stdout)
+            # ENTERED, not just constructed. create_app_session is a
+            # @contextmanager: assigning it runs none of its body, so the
+            # retry would have executed in exactly the environment that just
+            # failed and failed identically. Kept on the instance because the
+            # session it installs must outlive this method — every later
+            # read() runs inside it.
+            self._vt100_ctx = create_app_session(output=out)
+            self._vt100_ctx.__enter__()
+            return self._build_session()
+        except Exception:  # noqa: BLE001
+            ctx = getattr(self, "_vt100_ctx", None)
+            if ctx is not None:
+                try:
+                    ctx.__exit__(None, None, None)
+                except Exception:  # noqa: BLE001
+                    pass
+                self._vt100_ctx = None
+            return None
 
     # ── editing mode ─────────────────────────────────────────────────────────
 

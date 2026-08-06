@@ -435,13 +435,53 @@ def test_deleting_re_offers_completions(tmp_path, key_name):
     assert buffer.deleted, f"{key_name} no longer deletes anything"
 
 
-@pytest.mark.skipif(not AVAILABLE, reason="prompt_toolkit not installed")
-def test_no_rows_are_reserved_for_the_menu(tmp_path):
-    """Reserved rows are permanent dead space. At the default of eight the hint
-    bar sat in mid-screen; at one the menu had room for a single entry and read
-    as broken. Zero reserves nothing and lets the menu take what it needs."""
-    bar = InputBar(tmp_path, command_help())
-    if bar._session is None:                       # noqa: SLF001
-        pytest.skip("no line editor in this terminal")
 
-    assert bar._session.reserve_space_for_menu == 0   # noqa: SLF001
+# The test that used to live here asserted `reserve_space_for_menu == 0` and
+# called it "letting the menu take what it needs". That is not what zero does —
+# it disables the layout's minimum-height guarantee entirely — so this test did
+# not merely miss the bug, it pinned it in place and made the fix look like the
+# regression. Replaced by test_the_menu_is_actually_given_room below, which
+# asserts the property (there is room for what the completer yields) rather
+# than a number I had reasoned my way to.
+
+
+
+def test_the_menu_is_actually_given_room(tmp_path):
+    """`reserve_space_for_menu` is not padding — it is what makes the menu
+    appear at all.
+
+    prompt_toolkit only guarantees the layout a minimum height when this is
+    NON-zero (`if space and not get_app().is_done`). At 0 it returns a bare
+    Dimension() and the menu has to find room below the cursor on its own. On
+    a fresh screen it does, so completion looks fine; once the transcript grows
+    and the prompt reaches the last row it silently stops — reported as having
+    "stopped working".
+    """
+    from forge.tui.input import MAX_SUGGESTIONS
+
+    bar = _headless_bar(tmp_path)
+    reserved = bar._session.reserve_space_for_menu          # noqa: SLF001
+
+    assert reserved, "zero reserves nothing and the menu cannot draw at the screen bottom"
+    assert reserved >= MAX_SUGGESTIONS, (
+        f"the completer yields up to {MAX_SUGGESTIONS} entries but only "
+        f"{reserved} rows are guaranteed")
+
+
+def test_completion_while_typing_is_still_on(tmp_path):
+    """The other half of the same feature: room to draw is useless if nothing
+    asks for completions until Tab is pressed."""
+    bar = _headless_bar(tmp_path)
+    assert bar._session.complete_while_typing                # noqa: SLF001
+
+
+def test_a_vt100_retry_actually_enters_its_session(monkeypatch, tmp_path):
+    """create_app_session is a @contextmanager. Constructing it runs none of
+    its body, so a retry that merely assigns it executes in exactly the
+    environment that just failed — an inert fallback that reads as a fix."""
+    import inspect
+
+    from forge.tui.input import InputBar
+
+    src = inspect.getsource(InputBar._build_session_vt100)   # noqa: SLF001
+    assert "__enter__" in src, "the app session is constructed but never entered"
