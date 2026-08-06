@@ -67,8 +67,16 @@ class GraphSidecar:
         if self.graph_json.exists():
             return  # index once per session; reuse an existing graph
         env = {k: v for k, v in os.environ.items() if k not in _SECRET_ENV}
+        # --code-only: index the code with the local AST and nothing else.
+        # Without it graphify wants an API key to classify docs and images, so
+        # indexing failed with "ds no key" on every machine that did not have
+        # one — which is every machine, since nothing ever asked for one. The
+        # graph exists to answer "what calls this", and that is an AST
+        # question: the key would buy document classification a coding agent
+        # does not use, at the cost of money and of sending the repo off-box.
         proc = await asyncio.create_subprocess_exec(
-            sys.executable, "-m", "graphify", str(self.repo_path), "--no-label",
+            sys.executable, "-m", "graphify", str(self.repo_path),
+            "--no-label", "--code-only",
             cwd=str(self.repo_path), env=env,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
         )
