@@ -46,6 +46,7 @@ Worth stating, because the gaps below are not a verdict on the whole thing.
 | Unknown tool name lists the tools that do exist | VERIFIED — `Unknown tool 'reed_file'. Available tools: read_file.` |
 | Dangling `tool_use` repaired before replay | `repair_transcript`, so a turn that died mid-call does not poison the next one |
 | Retry with error classification and capped backoff | Four attempts, doubling from 2s |
+| A context-overflow 400 is treated as RECOVERABLE, not permanent | Matches the reference, which parses the same error's numbers out of its message text. Both refuse to let the one recoverable 400 be classified with the fatal ones. |
 | Read-before-edit enforced by the harness | Not advice — the edit fails |
 | Iteration ceiling ends with a handover, not a severed head | Added 2026-08-06 |
 | Per-turn tool refresh | A tool that appears mid-job becomes available |
@@ -54,7 +55,41 @@ Worth stating, because the gaps below are not a verdict on the whole thing.
 
 ## Gap 1 — Errors that name the exception instead of the fix
 
-**VERIFIED.** Four malformed calls, and what the model receives:
+The reference states the premise in a code comment, above the validation call:
+
+```ts
+// Validate input types with zod (surprisingly, the model is not great at
+// generating valid input)
+```
+
+The harness is built on the assumption that the model gets tool calls wrong.
+`formatZodValidationError` (utils/toolErrors.ts) then sorts the failure into
+three kinds and writes a sentence for each:
+
+```
+read_file failed due to the following issue:
+The required parameter `path` is missing
+
+grep failed due to the following issues:
+The parameter `pattern` type is expected as `string` but provided as `number`
+An unexpected parameter `lines` was provided
+```
+
+Missing, unexpected, mistyped — named in the tool's own vocabulary, with the
+raw error kept only as a fallback when none of the three apply.
+
+There is a second layer worth stealing whole. `buildSchemaNotSentHint`
+recognises one specific mechanical cause and hands back the exact recovery:
+
+> This tool's schema was not sent to the API… Without the schema in your
+> prompt, typed parameters (arrays, numbers, booleans) get emitted as strings
+> and the client-side parser rejects them. Load the tool first: call
+> ToolSearch with query "select:<tool>", then retry this call.
+
+That is the shape to copy — not "invalid input", but *why the call came out
+malformed* and *the command that fixes it*.
+
+**VERIFIED against Forge.** Four malformed calls, and what our model receives:
 
 ```
 missing required arg  -> Invalid input for 'read_file': 1 validation error for
@@ -82,9 +117,10 @@ provider behaviour: **DeepSeek and Gemini ignore a tool schema's `required`.**
 Missing arguments are not an edge case on this deployment — they are the normal
 failure, and the message that greets them teaches nothing.
 
-**What it should say:** what the tool needs, what arrived, and a correct
-example. `read_file needs "path" (string). You sent no arguments. Example:
-{"path": "src/main.py"}`.
+**What it should say:** the same three sentences, in Pydantic's terms. Its
+`ValidationError.errors()` already carries `type` (`missing`, `string_type`,
+`extra_forbidden`), `loc` and `input`, so the sort is a dozen lines — the work
+is writing the sentences, not extracting the facts.
 
 **Cost of the gap:** one wasted call per malformed invocation, minimum, and an
 unknown number of retries when the model guesses the same wrong shape twice.
@@ -189,6 +225,25 @@ Ranked by cost of the gap, not by effort.
 5. **Plausibility checking.** Unsolved. Worth designing before building.
 
 ---
+
+## What was actually read
+
+Stated so the next person knows how much of this is evidence and how much is
+inference. The first draft of this document was written from greps and memory,
+and its reference side was thin.
+
+Read in full: `verificationAgent.ts`, `utils/toolErrors.ts`,
+`bashToolUseOptions.tsx`, `FallbackPermissionRequest.tsx`, `builtInAgents.ts`,
+`exploreAgent.ts`, `DENIAL_WORKAROUND_GUIDANCE`.
+
+Read in part: `services/tools/toolExecution.ts` (the validation and permission
+path), `services/api/withRetry.ts` (classification and overflow parsing),
+`services/compact/prompt.ts` (`BASE_COMPACT_PROMPT`), `constants/prompts.ts`
+(structure and the risk block), `utils/messages.ts` (`wrapInSystemReminder`).
+
+Not read, and each may hold something: the query loop itself (`query.ts`),
+`Tool.ts` in full, the memory subsystem (`memdir/`), hooks, and the ~30 other
+named prompt constants enumerated but not opened.
 
 ## The honest limit
 
