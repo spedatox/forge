@@ -329,7 +329,7 @@ async def _run_turn(prompt: str, session: Session, settings: ForgeSettings,
             model=model, ctx=ctx, signal=signal, ledger=session.ledger,
             retry_attempts=settings.retry_attempts,
             retry_base_delay=settings.retry_base_delay_s,
-            emit=renderer, **kw,
+            **kw,              # includes the child's scoped emit
         ),
         parent_tools=lambda: session.tools,
         emit=renderer,

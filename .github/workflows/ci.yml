@@ -75,17 +75,36 @@ jobs:
       # Deliberately NOT a graceful skip: a deploy that quietly does nothing is
       # the exact failure this pipeline exists to end.
       - name: Check deploy secrets are configured
+        # Secrets arrive as ENV, never interpolated into the script body.
+        # `${{ secrets.SSH_KEY }}` inline expands a multi-line PEM straight into
+        # the shell: the first line becomes an unterminated quote and the step
+        # dies of a syntax error before it checks anything. That is what made a
+        # fully-configured repo report a broken deploy, with no SSH attempt ever
+        # reaching the server.
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_KEY: ${{ secrets.SSH_KEY }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
         run: |
           missing=""
-          [ -n "${{ secrets.SSH_HOST }}" ]   || missing="$missing SSH_HOST"
-          [ -n "${{ secrets.SSH_USER }}" ]   || missing="$missing SSH_USER"
-          [ -n "${{ secrets.SSH_KEY }}" ]    || missing="$missing SSH_KEY"
-          [ -n "${{ secrets.DEPLOY_PATH }}" ] || missing="$missing DEPLOY_PATH"
+          [ -n "$SSH_HOST" ]    || missing="$missing SSH_HOST"
+          [ -n "$SSH_USER" ]    || missing="$missing SSH_USER"
+          [ -n "$SSH_KEY" ]     || missing="$missing SSH_KEY"
+          [ -n "$DEPLOY_PATH" ] || missing="$missing DEPLOY_PATH"
           if [ -n "$missing" ]; then
             echo "::error::Missing repo secrets:$missing — add them under"
             echo "::error::Settings → Secrets and variables → Actions."
             exit 1
           fi
+          # A PEM that lost its line breaks in transit is the other way this
+          # fails, and it fails later and less legibly, at the SSH handshake.
+          case "$SSH_KEY" in
+            *"PRIVATE KEY"*) ;;
+            *) echo "::error::SSH_KEY does not look like a private key."
+               echo "::error::Paste the whole file including the BEGIN/END lines."
+               exit 1 ;;
+          esac
 
       - name: SSH deploy
         uses: appleboy/ssh-action@v1

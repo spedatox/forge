@@ -189,7 +189,7 @@ async def run_job(
                 model=model, ctx=ctx, signal=signal, ledger=ledger,
                 retry_attempts=settings.retry_attempts,
                 retry_base_delay=settings.retry_base_delay_s,
-                emit=emit, **kw,
+                **kw,          # includes the child's scoped emit
             ),
             parent_tools=lambda: tools,
             emit=emit,

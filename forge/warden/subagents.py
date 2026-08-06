@@ -202,6 +202,45 @@ class SubagentRunner:
     _slots: asyncio.Semaphore = field(
         default_factory=lambda: asyncio.Semaphore(MAX_CONCURRENT))
 
+    def _scoped_emit(self, spec: SubagentSpec):
+        """The child's events, translated so they cannot speak for the parent.
+
+        A child Warden is a full loop and emits everything a parent does —
+        including `done` when it finishes. Handing it the parent's emit meant
+        that frame went straight out to the client, which reads `done` as the
+        end of the turn: Heartbreaker closed the stream the moment the subagent
+        finished, while the parent carried on working invisibly and still
+        billing the provider.
+
+        So two kinds of frame never leave a child:
+
+        - **Terminal frames** (`done`, `error`). Only the parent's turn ends the
+          turn. A child's failure is already reported to the parent as a tool
+          result it can read and react to.
+        - **Prose** (`chunk`). The child's report is the tool result, not the
+          answer. Streaming it as if the parent had said it is what made a
+          subagent's write-up appear as Optimus's reply.
+
+        Tool activity IS forwarded, tagged with the subagent's name, because
+        otherwise a long delegation looks like a hang.
+        """
+        async def emit(event: dict) -> None:
+            if self.emit is None:
+                return
+            etype = str(event.get("type", ""))
+            if etype in ("done", "error", "chunk"):
+                return
+            if etype in ("tool", "tool_result"):
+                data = dict(event.get("data") or {})
+                name = data.get("name")
+                if name:
+                    data["name"] = f"{spec.name}:{name}"
+                await self.emit({"type": etype, "data": data})
+                return
+            await self.emit(event)      # usage and the like: same ledger, real cost
+
+        return emit
+
     def tools_for(self, spec: SubagentSpec) -> dict[str, "Tool"]:
         """The child's toolset: the allowlist, resolved against the parent's,
         and never including `task` itself (depth one)."""
@@ -228,13 +267,15 @@ class SubagentRunner:
                     "in this deployment, so it was not run."), True
 
         async with self._slots:
-            if self.emit is not None:
-                await self.emit({"type": "chunk",
-                                 "data": f"\n[{spec.name} subagent: running]\n"})
+            # No "subagent running" chunk. That was prose in the parent's answer
+            # for something the parent did not say — the same fault as streaming
+            # the child's report. The parent's own `task` tool call already
+            # shows in the transcript, and the child's tool rows arrive tagged.
             warden = self.build_warden(
                 system_prompt=spec.system_prompt,
                 tools=tools,
                 max_iterations=SUBAGENT_MAX_ITERATIONS,
+                emit=self._scoped_emit(spec),
             )
             try:
                 terminal = await warden.run(prompt)
