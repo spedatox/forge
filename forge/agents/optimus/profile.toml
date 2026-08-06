@@ -40,8 +40,12 @@ tools = ["coding", "web"]
 # read-only for review (§6).
 permission_mode = "act"
 
-# The single iteration ceiling (§3). Matches Mark VI's own 30-iteration guard.
-max_iterations = 30
+# The single iteration ceiling (§3). NOT Mark VI's 30: that guard is sized for
+# a chat backend answering a question, where thirty tool calls is generous. A
+# coding agent spends thirty orienting in an unfamiliar file — read, grep, read
+# again — and a real change lands well past it. This is a runaway guard, not a
+# work limit, and 30 was silently truncating ordinary jobs half-finished.
+max_iterations = 400
 
 [cell]
 # Default posture: no outbound network unless a job explicitly requests it (§8).

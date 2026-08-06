@@ -91,7 +91,7 @@ class Warden:
         tools: dict[str, Tool],
         model: Model,
         ctx: ToolContext,
-        max_iterations: int = 30,
+        max_iterations: int = 200,
         signal: asyncio.Event | None = None,
         emit: Emit | None = None,
         max_tool_concurrency: int = MAX_TOOL_CONCURRENCY,

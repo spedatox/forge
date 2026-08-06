@@ -395,8 +395,16 @@ def _report(terminal, session: Session, verbose: bool, already_shown: bool = Fal
     if terminal.reason is StopReason.ABORTED:
         ansi.write(ansi.paint("  ⏹ stopped", "yellow"))
     elif terminal.reason is StopReason.MAX_ITERATIONS:
-        ansi.write(ansi.paint(f"  ⏹ hit the {session.cfg.max_iterations}-iteration ceiling",
-                              "yellow"))
+        # The transcript is intact and the next prompt continues from it, so say
+        # that. Reporting only the ceiling reads as "the work is lost", and an
+        # operator who does not know they can simply say "carry on" starts the
+        # whole job again.
+        ansi.write(ansi.paint(
+            f"  ⏹ hit the {session.cfg.max_iterations}-iteration ceiling — "
+            "the work so far is kept", "yellow"))
+        ansi.write(ansi.paint(
+            "    say 'continue' to carry on from here, or /compact first if the "
+            "context is full", "dim"))
     elif terminal.reason is StopReason.ERROR and not already_shown:
         # The renderer usually showed this already, via the error event. Saying
         # it twice makes one failure look like two.

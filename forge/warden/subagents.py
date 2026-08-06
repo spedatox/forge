@@ -40,11 +40,11 @@ logger = logging.getLogger(__name__)
 # a cap one turn could open an unbounded number of model streams.
 MAX_CONCURRENT = 4
 
-# A subagent is a means, not an end: it reports back and stops. This is lower
-# than the parent's ceiling on purpose — a subagent still going at forty
-# iterations has misunderstood its task, and the parent is better served by a
-# partial answer it can react to than by a long silence.
-SUBAGENT_MAX_ITERATIONS = 20
+# A subagent is a means, not an end: it reports back and stops. Lower than the
+# parent's ceiling on purpose — but not so low that a genuine search across a
+# large repo gets cut off and reported as partial, which is the failure that
+# makes delegation not worth the round trip.
+SUBAGENT_MAX_ITERATIONS = 60
 
 
 @dataclass(frozen=True)

@@ -60,6 +60,6 @@ class AgentConfig:
     tool_names: tuple[str, ...]     # the tool allowlist — the security boundary (§2/§4)
     system_prompt: str
     permission_mode: str = "act"    # "act" | "plan" (§6)
-    max_iterations: int = 30        # the single iteration ceiling (§3)
+    max_iterations: int = 200       # runaway guard, not a work limit (§3)
     cell: CellSpec = CellSpec()
     git: GitIdentity = GitIdentity()
