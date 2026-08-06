@@ -19,6 +19,25 @@ import os
 import sys
 
 
+_COMMANDS = ("chat", "demo", "serve", "connect", "agents")
+
+
+def _with_default_command(argv: list[str]) -> list[str]:
+    """Bare `forge` opens a session in the current directory.
+
+    The overwhelmingly common invocation is "work with me in this repo", and
+    requiring a subcommand for it makes the tool feel like infrastructure
+    rather than something you reach for. Flags pass through, so `forge -v` and
+    `forge --model x` mean what they look like they mean.
+
+    An explicit subcommand and `--help` are untouched, so nothing that worked
+    before changes.
+    """
+    if argv and (argv[0] in _COMMANDS or argv[0] in ("-h", "--help")):
+        return argv
+    return ["chat", *argv]
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="forge", description="The Forge — SPEDA Mark VI execution peer")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -42,11 +61,22 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("agents", help="list configured agents")
 
-    args = parser.parse_args(argv)
+    args = parser.parse_args(_with_default_command(
+        list(argv) if argv is not None else sys.argv[1:]))
     # Local convenience: a .env beside the repo is how an operator keeps keys
     # out of their shell profile. Real environment variables still win.
+    #
+    # Two files, most specific first, because load_dotenv never overwrites a
+    # name that is already set. So the precedence is: real environment > this
+    # project's .env > the user's own. The user-level file is what makes a
+    # global install usable — `forge` run in some repo that has never heard of
+    # it still finds the operator's keys, instead of needing a .env copied into
+    # every project they open.
+    from pathlib import Path as _Path
+
     from forge.config import load_dotenv
     load_dotenv()
+    load_dotenv(_Path(os.environ.get("FORGE_HOME") or (_Path.home() / ".forge")) / ".env")
     logging.basicConfig(level=os.environ.get("FORGE_LOG_LEVEL", "INFO"),
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
