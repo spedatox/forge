@@ -1,4 +1,4 @@
-# F.O.R.G.E
+# F.O.R.G.E.
 ### **F**ramework of **O**perational **R**untime & **G**ated **E**xecution
 
 A coding agent that runs on your machine or on a server, with sandboxed
