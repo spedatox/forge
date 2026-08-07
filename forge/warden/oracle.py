@@ -37,11 +37,59 @@ class Answer:
 DENIED = Answer(approved=False)
 
 
+@dataclass(frozen=True)
+class Reply:
+    """The operator's answer to an open question.
+
+    Distinct from `Answer` because the two failure directions are opposites, and
+    conflating them would get one of them wrong.
+
+    An unanswered PERMISSION request is a no: absence of an operator must never
+    become consent, so `Answer` degrades to `approved=False` and the action does
+    not happen. An unanswered QUESTION is not a no — there is nothing to refuse.
+    Blocking the work because nobody was around to offer an opinion would turn a
+    courtesy into a deadlock, so this degrades to `answered=False` and the agent
+    is told to use its own judgement and say what it assumed.
+    """
+    answered: bool
+    text: str = ""
+
+    @property
+    def guidance(self) -> str:
+        """What the model should be told, either way."""
+        if self.answered:
+            return self.text
+        return ("No answer came back — nobody is reachable right now. Do not "
+                "wait and do not ask again. Choose the option you judge best, "
+                "proceed, and state plainly in your final report which way you "
+                "went and that you decided it yourself.")
+
+
+UNANSWERED = Reply(answered=False)
+
+
 @runtime_checkable
 class PermissionOracle(Protocol):
     async def ask(self, tool_name: str, action_key: str, reason: str) -> Answer:
         """Put one decision to whoever can make it. Must always return."""
         ...
+
+    async def consult(self, question: str, options: list[str] | None = None) -> Reply:
+        """Put an open question to the operator. Must always return.
+
+        Optional on the protocol in practice — `has_consult` below lets callers
+        detect an older oracle rather than crashing on one. Every implementation
+        in this repo has it."""
+        ...
+
+
+def has_consult(oracle: Any) -> bool:
+    """Whether this oracle can carry an open question.
+
+    Oracles arrive through a seam and an external one may predate `consult`.
+    Asking here beats an AttributeError inside a tool dispatch, which the model
+    would read as the question having failed rather than as unsupported."""
+    return callable(getattr(oracle, "consult", None))
 
 
 class AutoDenyOracle:
@@ -56,6 +104,14 @@ class AutoDenyOracle:
         return Answer(approved=False,
                       note="no operator channel is attached to this job, so gated "
                            "operations cannot be approved while it runs")
+
+    async def consult(self, question: str, options: list[str] | None = None) -> Reply:
+        """No channel, so no answer — but note the asymmetry with `ask` above.
+
+        That one denies. This one does not "deny" anything, because a question
+        is not a request for permission: it returns unanswered and the model is
+        told to decide for itself and disclose that it did."""
+        return UNANSWERED
 
 
 class ChannelOracle:
@@ -76,6 +132,7 @@ class ChannelOracle:
         self._job_id = job_id
         self._chat_id = chat_id
         self._pending: dict[str, asyncio.Future[Answer]] = {}
+        self._questions: dict[str, asyncio.Future[Reply]] = {}
 
     async def ask(self, tool_name: str, action_key: str, reason: str) -> Answer:
         ask_id = uuid.uuid4().hex
@@ -109,6 +166,55 @@ class ChannelOracle:
         finally:
             self._pending.pop(ask_id, None)
 
+    async def consult(self, question: str, options: list[str] | None = None) -> Reply:
+        """Park on an open question, the same way `ask` parks on a decision.
+
+        A separate frame type rather than a flag on `permission_request`: a
+        consumer that renders every ask as an Allow/Deny pair would show the
+        wrong two buttons for "which of these three approaches?", and would have
+        no way to send prose back. Different question, different frame.
+
+        The timeout is the same clock but the expiry means something else — see
+        `Reply`. Here, running out means proceed on your own judgement.
+        """
+        ask_id = uuid.uuid4().hex
+        future: asyncio.Future[Reply] = asyncio.get_running_loop().create_future()
+        self._questions[ask_id] = future
+        frame = {
+            "type": "question",
+            "ask_id": ask_id,
+            "job_id": self._job_id,
+            "question": question,
+            "options": list(options or []),
+            "timeout_s": self._timeout,
+        }
+        if self._chat_id:
+            frame["chat_id"] = self._chat_id
+        try:
+            await self._send(frame)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("question_send_failed", extra={"error": repr(e)})
+            self._questions.pop(ask_id, None)
+            return UNANSWERED
+
+        try:
+            return await asyncio.wait_for(asyncio.shield(future), timeout=self._timeout)
+        except (asyncio.TimeoutError, TimeoutError):
+            logger.info("question_timed_out", extra={"ask_id": ask_id})
+            return UNANSWERED
+        except asyncio.CancelledError:
+            raise
+        finally:
+            self._questions.pop(ask_id, None)
+
+    def answer(self, ask_id: str, text: str) -> bool:
+        """Deliver a reply to a parked question. False if nothing was waiting."""
+        future = self._questions.pop(ask_id, None)
+        if future is None or future.done():
+            return False
+        future.set_result(Reply(answered=True, text=text))
+        return True
+
     def resolve(self, ask_id: str, answer: Answer) -> bool:
         """Deliver an answer. False if nothing was waiting for it — a late reply
         to a question that already timed out is not an error, and treating it as
@@ -127,3 +233,10 @@ class ChannelOracle:
             if not future.done():
                 future.set_result(Answer(False, note=note))
             self._pending.pop(ask_id, None)
+        # Questions abandon to UNANSWERED, not to a denial. A closed socket is
+        # not the operator saying no to an idea — it is nobody being there, and
+        # the model should decide and disclose rather than treat it as refusal.
+        for ask_id, q in list(self._questions.items()):
+            if not q.done():
+                q.set_result(UNANSWERED)
+            self._questions.pop(ask_id, None)
