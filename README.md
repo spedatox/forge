@@ -1,5 +1,5 @@
 # F.O.R.G.E.
-### **F**ramework of **O**perational **R**untime & **G**ated **E**xecution
+### **F**ramework of **O**perational **R**untime & **G**ated **E**xecution.
 
 A coding agent that runs on your machine or on a server, with sandboxed
 execution and a permission gate in front of anything irreversible.
