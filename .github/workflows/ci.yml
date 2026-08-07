@@ -118,6 +118,38 @@ jobs:
             set -euo pipefail
             cd "${{ secrets.DEPLOY_PATH }}"
 
+            # The clone is owned by root (deploy/README.md installs it as root,
+            # and forge@.service has no User= so systemd runs it as root), but
+            # this script runs as the deploy account. Git 2.35.2+ refuses to
+            # operate on a tree owned by someone else — "detected dubious
+            # ownership" — and exits 128 before doing anything.
+            #
+            # Declared here rather than left as a manual step on the box: the
+            # pipeline exists because "whatever someone last did by hand" was
+            # 26 commits behind, and a deploy that depends on undocumented
+            # server state is the same failure wearing a different hat. A
+            # rebuilt host works on the first run.
+            #
+            # Idempotent: --add appends unconditionally, so without the check
+            # every deploy would grow ~/.gitconfig by one more identical line.
+            if ! git config --global --get-all safe.directory 2>/dev/null \
+                 | grep -Fxq "${{ secrets.DEPLOY_PATH }}"; then
+              echo "marking ${{ secrets.DEPLOY_PATH }} as a safe directory"
+              git config --global --add safe.directory "${{ secrets.DEPLOY_PATH }}"
+            fi
+
+            # The sudoers rules below match on an exact command line, so the
+            # unit-file path is hardcoded and CANNOT be a variable. That makes
+            # DEPLOY_PATH and that literal two statements of the same fact —
+            # check them here, where the message can say so, rather than at the
+            # sudo call, where it fails as an unexplained permission denial.
+            if [ "${{ secrets.DEPLOY_PATH }}" != "/opt/forge-mk1" ]; then
+              echo "::error::DEPLOY_PATH is not /opt/forge-mk1, but the sudoers"
+              echo "::error::rules in /etc/sudoers.d/forgedeploy hardcode that"
+              echo "::error::path. Move the clone, or update both together."
+              exit 1
+            fi
+
             # Mirror main exactly. .env and .env.<agent> are gitignored and so
             # survive; the venv lives in .venv and is likewise untracked.
             git fetch --prune origin main

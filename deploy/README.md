@@ -132,7 +132,44 @@ in §2.
 
 ## 7. Updating
 
-There is no CI for this repo. After pushing:
+**CI deploys this.** `.github/workflows/ci.yml` runs the suite and the demo on
+every branch, and on a green push to `main` it SSHes in and does everything
+below. Pushing to main is the update procedure; the manual commands here are for
+when the pipeline is unavailable.
+
+That paragraph used to say "There is no CI for this repo", which stopped being
+true and stayed on the page — the same drift that made the Hisar skill file
+describe a write-only vault months after reads were opened.
+
+### What the deploy account needs
+
+The clone is owned by **root** (§1 installs it as root, and `forge@.service` has
+no `User=` so systemd runs it as root), while CI connects as `SSH_USER`. That
+split is deliberate: the service needs the docker socket, and the deploy account
+gets no general sudo — `/etc/sudoers.d/forgedeploy` matches the exact command
+lines the workflow uses, which is why those are spelled out verbatim there and
+the unit path is not a variable.
+
+Git ≥ 2.35.2 refuses to touch a tree owned by another user, so a fresh host
+fails its first deploy with:
+
+```
+fatal: detected dubious ownership in repository at '***'
+```
+
+The workflow now declares the exception itself, idempotently, before its first
+git command — so a rebuilt host works on the first run rather than needing a
+step nobody wrote down. Doing it by hand is the same line, as the deploy user:
+
+```bash
+git config --global --add safe.directory /opt/forge-mk1
+```
+
+Do **not** "fix" this by chowning the tree to the deploy user. It only inverts
+the mismatch: the root service writes `__pycache__` back into the same tree, and
+the next `git status` complains from the other side.
+
+### By hand, when CI cannot
 
 ```bash
 cd /opt/forge-mk1 && git fetch origin main && git reset --hard origin/main
