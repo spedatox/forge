@@ -63,6 +63,38 @@ def without_graph_tools(tools: dict[str, Tool]) -> dict[str, Tool]:
     return {name: tool for name, tool in tools.items() if name not in GRAPH_TOOLS}
 
 
+#: The vault tools. Same rule as the graph tools and the same reason — all three
+#: need a machine token, and without one every call is a 401 the model reads as
+#: a transient fault worth retrying.
+#:
+#: Unlike the graph set there is no `hisar_index` equivalent: nothing here can
+#: create the missing credential, so the whole group goes.
+HISAR_TOOL_NAMES = ("hisar_list", "hisar_read", "hisar_deposit")
+
+
+def without_hisar_tools(tools: dict[str, Tool]) -> dict[str, Tool]:
+    return {name: tool for name, tool in tools.items()
+            if name not in HISAR_TOOL_NAMES}
+
+
+def resolve_optional(tools: dict[str, Tool]) -> dict[str, Tool]:
+    """Drop every optional group this deployment cannot actually serve.
+
+    One call site for "what is genuinely available here", so a new
+    externally-gated group is one entry rather than another thing every caller
+    has to remember to filter. The graph is deliberately NOT folded in: it can
+    appear mid-session once `graph_index` builds one, so it is re-checked per
+    turn rather than settled once at startup."""
+    from forge import notify
+    from forge.tools import hisar
+
+    if not hisar.configured():
+        tools = without_hisar_tools(tools)
+    if not notify.configured():
+        tools = {n: t for n, t in tools.items() if n != "telegram_send"}
+    return tools
+
+
 class BuiltinToolProvider:
     """The curated set, filtered by the profile's allowlist.
 

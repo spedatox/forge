@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -19,6 +20,7 @@ from forge.agents.registry import AgentRegistry
 from forge.cell.base import CellPolicy
 from forge.cell.factory import build_cell
 from forge.config import ForgeSettings
+from forge import notify
 from forge.gate.events import EventFan
 from forge.gate.protocol import JobEvent, JobRequest
 from forge.graph.sidecar import GraphSidecar
@@ -29,6 +31,7 @@ from forge.warden.toolsource import (
     ToolProvider,
     close_providers,
     fold_providers,
+    resolve_optional,
     without_graph_tools,
 )
 from forge.warden.filestate import FileStateCache
@@ -152,7 +155,7 @@ async def run_job(
         )
 
         async def _tools() -> dict:
-            built = await fold_providers(providers, cfg, request)
+            built = resolve_optional(await fold_providers(providers, cfg, request))
             live = ctx.graph
             if live is not None and getattr(live, "available", False):
                 return built
@@ -220,10 +223,23 @@ async def run_job(
         # and replaying that raw would make the agent forget the whole
         # conversation instead of just the one botched turn.
         history = repair_transcript(request.history) if request.history else []
+        started = time.monotonic()
         if history:
             terminal = await warden.run_messages(history)
         else:
             terminal = await warden.run(request.task)
+
+        # Tell the owner, if they are not here to see it. A dispatched job runs
+        # on a box nobody is logged into; without this its completion exists
+        # only as a journal line. Awaited rather than fired-and-forgotten so it
+        # cannot be cancelled by the teardown in `finally` — it is two HTTP
+        # calls at most, and `send` never raises.
+        await notify.job_finished(
+            cfg.agent_id, request.task,
+            (terminal.final_text or "").strip(),
+            time.monotonic() - started,
+            ok=terminal.reason is StopReason.COMPLETED,
+        )
         return terminal
     except Exception as e:  # noqa: BLE001 — fail loud (§9.5) as a terminal error event
         logger.exception("run_job_failed")
