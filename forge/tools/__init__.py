@@ -7,6 +7,7 @@ harness-side safety flags; the loop and permission engine read those, the model
 never sees them.
 """
 from forge.tools.shell import RunCommand
+from forge.tools.ask import AskOperator
 from forge.tools.diagnostics import Diagnostics
 from forge.tools.files import ReadFile, WriteFile, EditFile
 from forge.tools.graph import GraphQuery, GraphPath, GraphOverview, GraphIndex
@@ -26,6 +27,12 @@ NAV_TOOLS = [ReadFile, Grep, Glob]
 # independent of the Cell's allow_network posture.
 WEB_TOOLS = [WebSearch, WebFetch]
 
+# Asking the owner a question mid-job. In CODING_TOOLS rather than its own
+# group: reaching a fork you should not pick alone is not an optional extra
+# for real work, it is the alternative to guessing silently. Degrades on its
+# own when no operator is reachable, so it needs no dispatch-time gate.
+ASK_TOOLS = [AskOperator]
+
 # Reusable tool groups, referenced by agent configs via their allowlist (§2).
 # todo_write is in the coding group rather than its own: a plan is not an
 # optional capability for multi-step work, it is what keeps it coherent.
@@ -34,7 +41,7 @@ WEB_TOOLS = [WebSearch, WebFetch]
 # context. A profile that omits it simply never spawns subagents.
 CODING_TOOLS = [*NAV_TOOLS, WriteFile, EditFile, RunCommand,
                 GraphQuery, GraphPath, GraphOverview, GraphIndex, Diagnostics, TodoWrite,
-                EnterWorktree, ExitWorktree, TaskTool]
+                EnterWorktree, ExitWorktree, TaskTool, AskOperator]
 
 # Centurion's group: run security tooling in the Cell (RunCommand) and read/write
 # scan output and engagement reports (files). No graph — its subject is a live
@@ -45,10 +52,11 @@ SECURITY_TOOLS = [*NAV_TOOLS, RunCommand, WriteFile, EditFile]
 ALL_TOOLS = {cls.name: cls for cls in [
     RunCommand, ReadFile, WriteFile, EditFile, Grep, Glob,
     GraphQuery, GraphPath, GraphOverview, GraphIndex, Diagnostics, WebSearch, WebFetch, TodoWrite,
-    EnterWorktree, ExitWorktree, TaskTool,
+    EnterWorktree, ExitWorktree, TaskTool, AskOperator,
 ]}
 
 __all__ = ["ALL_TOOLS", "NAV_TOOLS", "CODING_TOOLS", "SECURITY_TOOLS", "WEB_TOOLS",
+           "ASK_TOOLS",
            "RunCommand", "ReadFile", "WriteFile", "EditFile", "Grep", "Glob",
            "GraphQuery", "GraphPath", "GraphOverview", "GraphIndex", "Diagnostics", "WebSearch", "WebFetch",
-           "TodoWrite", "EnterWorktree", "ExitWorktree", "TaskTool"]
+           "TodoWrite", "EnterWorktree", "ExitWorktree", "TaskTool", "AskOperator"]

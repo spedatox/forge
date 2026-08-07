@@ -20,7 +20,7 @@ from typing import Any
 from forge.agents.config import AgentConfig
 from forge.tui import ansi, keys
 from forge.warden.ledger import TokenLedger
-from forge.warden.oracle import Answer
+from forge.warden.oracle import UNANSWERED, Answer, Reply
 from forge.warden.permissions import AllowList
 from forge.warden.tool import Tool
 
@@ -81,6 +81,51 @@ class TerminalOracle:
             if note:
                 return Answer(False, note=note)
         return Answer(False, note="declined at the prompt")
+
+    async def consult(self, question: str, options: list[str] | None = None) -> Reply:
+        """An open question, to somebody who is right here.
+
+        No timeout, for the same reason `ask` has none: the operator just typed,
+        so they are demonstrably present. And unlike the permission prompt there
+        is no safe default to start the cursor on — a question has no equivalent
+        of "no", which is why an empty answer returns UNANSWERED and lets the
+        agent proceed on its own judgement rather than being read as a refusal.
+        """
+        if self.spinner is not None:
+            self.spinner.pause()
+        try:
+            ansi.write()
+            ansi.write(ansi.paint("  ?  QUESTION", "bold", "cyan"))
+            for line in question.splitlines() or [question]:
+                ansi.write("    " + ansi.paint(line, "bold"))
+            if options:
+                ansi.write()
+                for n, option in enumerate(options, 1):
+                    ansi.write("    " + ansi.paint(f"{n}. {option}", "grey"))
+            ansi.write()
+            ansi.write(ansi.paint(
+                "    answer, or press enter to let it decide", "dim"))
+            text = (await asyncio.to_thread(_read_line, "    > ")).strip()
+        finally:
+            if self.spinner is not None:
+                self.spinner.resume()
+
+        if not text:
+            return UNANSWERED
+        # A bare number picks the option, so answering a three-way choice costs
+        # one keystroke. Anything else is prose and passes through untouched.
+        if options and text.isdigit() and 1 <= int(text) <= len(options):
+            return Reply(answered=True, text=options[int(text) - 1])
+        return Reply(answered=True, text=text)
+
+
+def _read_line(prompt: str) -> str:
+    try:
+        return input(prompt)
+    except (EOFError, KeyboardInterrupt):
+        # Interrupting a question is not a refusal — there is nothing to refuse.
+        # It means "stop asking me", which is what UNANSWERED tells the agent.
+        return ""
 
 
 _CHOICES = (

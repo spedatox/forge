@@ -214,6 +214,13 @@ class ForgePeer:
                             note=str(frame.get("note", "")))
             if not self._oracle.resolve(ask_id, answer):
                 logger.info("permission_response_unmatched", extra={"ask_id": ask_id})
+        elif ftype == "question_response":
+            # The open-question counterpart of permission_response. Separate
+            # frame because the payload is prose rather than a verdict, and a
+            # consumer rendering Allow/Deny buttons would have nowhere to put it.
+            ask_id = str(frame.get("ask_id", ""))
+            if not self._oracle.answer(ask_id, str(frame.get("text", ""))):
+                logger.info("question_response_unmatched", extra={"ask_id": ask_id})
         elif ftype == "shutdown":
             logger.info("peer_shutdown_requested")
             self._shutdown = True
