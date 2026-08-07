@@ -11,8 +11,10 @@ from forge.tools.ask import AskOperator
 from forge.tools.diagnostics import Diagnostics
 from forge.tools.files import ReadFile, WriteFile, EditFile
 from forge.tools.graph import GraphQuery, GraphPath, GraphOverview, GraphIndex
+from forge.tools.hisar import HisarDeposit, HisarList, HisarRead
 from forge.tools.search import Grep, Glob
 from forge.tools.task import TaskTool
+from forge.tools.telegram import TelegramSend
 from forge.tools.todo import TodoWrite
 from forge.tools.web import WebFetch, WebSearch
 from forge.tools.worktree import EnterWorktree, ExitWorktree
@@ -26,6 +28,19 @@ NAV_TOOLS = [ReadFile, Grep, Glob]
 # take navigation without taking the open internet; see web.py on why this is
 # independent of the Cell's allow_network posture.
 WEB_TOOLS = [WebSearch, WebFetch]
+
+# The vault. Its own group because it is the owner's filesystem rather than a
+# capability of the repo: a profile can take coding tools without being handed a
+# door into the owner's documents. Withheld at dispatch when no machine token is
+# configured (see toolsource.without_hisar_tools), so an agent whose profile
+# allows them still never sees a door it has no key to.
+HISAR_TOOLS = [HisarList, HisarRead, HisarDeposit]
+
+# Reaching the owner mid-job. Its own group for the same reason the vault is:
+# messaging a person is not a capability of working on a repo, and a profile
+# should be able to take coding tools without one. Withheld at dispatch when
+# no bot is configured.
+NOTIFY_TOOLS = [TelegramSend]
 
 # Asking the owner a question mid-job. In CODING_TOOLS rather than its own
 # group: reaching a fork you should not pick alone is not an optional extra
@@ -52,11 +67,13 @@ SECURITY_TOOLS = [*NAV_TOOLS, RunCommand, WriteFile, EditFile]
 ALL_TOOLS = {cls.name: cls for cls in [
     RunCommand, ReadFile, WriteFile, EditFile, Grep, Glob,
     GraphQuery, GraphPath, GraphOverview, GraphIndex, Diagnostics, WebSearch, WebFetch, TodoWrite,
-    EnterWorktree, ExitWorktree, TaskTool, AskOperator,
+    EnterWorktree, ExitWorktree, TaskTool,
+    HisarList, HisarRead, HisarDeposit, TelegramSend, AskOperator,
 ]}
 
 __all__ = ["ALL_TOOLS", "NAV_TOOLS", "CODING_TOOLS", "SECURITY_TOOLS", "WEB_TOOLS",
-           "ASK_TOOLS",
+           "HISAR_TOOLS", "NOTIFY_TOOLS", "ASK_TOOLS",
            "RunCommand", "ReadFile", "WriteFile", "EditFile", "Grep", "Glob",
            "GraphQuery", "GraphPath", "GraphOverview", "GraphIndex", "Diagnostics", "WebSearch", "WebFetch",
-           "TodoWrite", "EnterWorktree", "ExitWorktree", "TaskTool", "AskOperator"]
+           "TodoWrite", "EnterWorktree", "ExitWorktree", "TaskTool",
+           "HisarList", "HisarRead", "HisarDeposit", "TelegramSend", "AskOperator"]

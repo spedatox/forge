@@ -52,7 +52,8 @@ from forge.warden.permissions import AllowList, Mode, PermissionEngine
 from forge.warden.state import StopReason
 from forge.warden.subagents import SubagentRunner
 from forge.warden.tool import ToolContext
-from forge.warden.toolsource import close_providers, fold_providers, without_graph_tools
+from forge.warden.toolsource import (close_providers, fold_providers,
+                                     resolve_optional, without_graph_tools)
 
 
 async def run_repl(agent: str = "optimus", workspace: Path | None = None,
@@ -93,7 +94,7 @@ async def run_repl(agent: str = "optimus", workspace: Path | None = None,
         # QUERY tools are withheld until graph_index builds one — they would
         # otherwise answer "unavailable" to a model their own descriptions told
         # to try them first.
-        tools = await fold_providers(providers, cfg, request)
+        tools = resolve_optional(await fold_providers(providers, cfg, request))
 
         session = Session(
             cfg=cfg, model_ref=model_ref, workspace=workspace, tools=tools, cell=cell,
