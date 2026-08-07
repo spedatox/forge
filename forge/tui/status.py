@@ -38,6 +38,45 @@ PRICES: dict[str, tuple[float, float]] = {}
 
 _BRANCH_CACHE: dict[str, str] = {}
 
+WARN_FULLNESS = 0.75
+"""Where the context stops being background information.
+
+Set below the compaction threshold rather than at it, on the same reasoning the
+reference uses for its own warning: telling somebody their context is full at
+the moment it is being summarized away is a notification, not a warning. There
+is nothing left to decide by then. Announced early enough that `/clear` or
+finishing the current thread is still a choice.
+"""
+
+def pressure_warning(session: "Session") -> str:
+    """What to say if this session has just crossed into context pressure, else "".
+
+    Reads the ledger rather than recomputing: `fullness` is the same figure the
+    engine's own compaction threshold consults, so the warning and the behaviour
+    it predicts cannot disagree.
+
+    The already-said flag lives ON the session, not in a module-level set keyed
+    by `id()`. CPython reuses the id of a collected object, so an id-keyed set
+    silently suppresses the warning for a later session that happens to land on
+    the same address — a bug that would never reproduce and would look like the
+    warning "sometimes not firing".
+    """
+    led = session.ledger
+    if not led.turns or led.fullness < WARN_FULLNESS:
+        return ""
+    if getattr(session, "context_warned", False):
+        return ""
+    session.context_warned = True
+    return (f"context is {int(100 * led.fullness)}% full — the next turns will "
+            f"start compacting. /clear to start fresh, or /compact now to "
+            f"choose the moment.")
+
+
+def forget_pressure(session: "Session") -> None:
+    """Re-arm the warning. Called after context is reclaimed, because crossing
+    the line a second time is a second thing worth knowing."""
+    session.context_warned = False
+
 
 def _humanize(n: int) -> str:
     if n >= 1_000_000:

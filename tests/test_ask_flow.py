@@ -150,6 +150,38 @@ def test_an_exact_standing_approval_does_satisfy_it():
     assert oracle.asked == [], "a decision already on file is not re-asked"
 
 
+# ── The scope of a yes ───────────────────────────────────────────────────────
+# The denial's counterpart, and the more dangerous half. A refusal stops one
+# call and the model has to think again; an approval generalises on its own —
+# "they let me force-push" quietly becomes a belief about force-pushing, and the
+# second one is never put to anybody.
+def test_an_approved_action_is_told_what_the_approval_covers():
+    result = _dispatch(_ctx(Recording(Answer(approved=True))))
+    assert not result.is_error
+    assert "does not extend" in result.content
+    assert "ask again" in result.content
+
+
+def test_the_scope_note_rides_with_the_result_not_instead_of_it():
+    """It is an annotation on a successful call. Losing the output to make room
+    for advice about the output would be a poor trade."""
+    result = _dispatch(_ctx(Recording(Answer(approved=True))))
+    assert "pushed" in result.content
+
+
+def test_an_ungated_action_gets_no_lecture():
+    """Nothing was approved, because nothing needed approving. Attaching the
+    note to ordinary calls is how it becomes furniture."""
+    result = _dispatch(_ctx(Recording(Answer(True))), "pytest -q")
+    assert "does not extend" not in result.content
+
+
+def test_a_denial_gets_the_denial_guidance_and_not_the_approval_note():
+    result = _dispatch(_ctx(Recording(Answer(approved=False))))
+    assert result.is_error
+    assert "does not extend" not in result.content
+
+
 # ── Persistence ──────────────────────────────────────────────────────────────
 def test_approvals_survive_the_job_that_granted_them(tmp_path):
     store = tmp_path / "allowlist.json"

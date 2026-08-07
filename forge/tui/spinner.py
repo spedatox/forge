@@ -43,6 +43,19 @@ VERB_EVERY_S = 6.0
 # Below this a count is noise; the operator cares about thousands, not bytes.
 _TOKEN_FLOOR = 200
 
+# How long nothing may arrive before the line says so.
+#
+# Every spinner answers "am I alive". Only this answers "is anything actually
+# arriving" — and a rotating verb proves the event loop is turning, which is
+# exactly what stays true when the provider has silently stopped sending. The
+# operator's next move, wait or interrupt, depends on telling those apart, and
+# without this they render identically.
+#
+# Suppressed while a tool is running: a two-minute test suite is not a stall,
+# and colouring it red teaches the eye to ignore the colour, which costs the
+# signal in the one case it was built for.
+STALL_AFTER_S = 4.0
+
 
 def _humanize_tokens(n: int) -> str:
     if n >= 1_000_000:
@@ -63,13 +76,28 @@ class Spinner:
         self._interruptible = interruptible
         self._visible = False
         self._paused = False
+        self._last_progress = 0.0
+        """When something last actually arrived. Reset by streamed characters
+        and by any status change — a tool starting is progress even though no
+        token came with it."""
+        self._tool_running = False
 
     # ── lifecycle ────────────────────────────────────────────────────────────
+
+    def start_clock(self) -> None:
+        """Begin timing without starting a draw loop.
+
+        For `LiveRegion`, which draws the header itself as one row of a larger
+        frame. Two objects drawing on one clock is how a frame ends up half
+        from each; this keeps the timing here — where `render`, the stall
+        detector and the verb rotation all read it — and the drawing there."""
+        self._started = time.monotonic()
+        self._last_progress = self._started
 
     def start(self) -> None:
         if self._task is not None:
             return
-        self._started = time.monotonic()
+        self.start_clock()
         self._task = asyncio.create_task(self._run())
 
     async def stop(self) -> None:
@@ -113,11 +141,26 @@ class Spinner:
         per token is close enough to answer "is this getting expensive".
         """
         self._chars += max(0, n)
+        if n > 0:
+            self._last_progress = time.monotonic()
 
     def set_status(self, status: str) -> None:
         """A short note replacing the verb — a running tool, a compaction, a
-        retry. What the harness is doing beats a generic verb every time."""
+        retry. What the harness is doing beats a generic verb every time.
+
+        Counts as progress, and sets the tool flag when it names one. A tool
+        that takes four minutes is working, not stalled, and the only thing
+        that knows the difference is which status was last set."""
         self._status = status.strip()
+        self._last_progress = time.monotonic()
+        self._tool_running = self._status.startswith("Running ")
+
+    @property
+    def stalled_for(self) -> float:
+        """Seconds since anything arrived, or 0 while a tool is running."""
+        if self._tool_running or not self._started:
+            return 0.0
+        return max(0.0, time.monotonic() - self._last_progress)
 
     # ── drawing ──────────────────────────────────────────────────────────────
 
@@ -125,8 +168,9 @@ class Spinner:
     def elapsed_s(self) -> float:
         return time.monotonic() - self._started if self._started else 0.0
 
-    def render(self, now: float | None = None) -> str:
+    def render(self, now: float | None = None, stalled_for: float | None = None) -> str:
         t = self.elapsed_s if now is None else now
+        stalled = self.stalled_for if stalled_for is None else stalled_for
         frames = FRAMES if ansi.unicode_ok() else FALLBACK_FRAMES
         frame = frames[int(t / TICK_S) % len(frames)]
         label = self._status or VERBS[int(t / VERB_EVERY_S) % len(VERBS)]
@@ -139,7 +183,25 @@ class Spinner:
         if tokens >= _TOKEN_FLOOR:
             bits.append(f"↓ {_humanize_tokens(tokens)} tokens")
 
-        return (ansi.paint(f"  {frame} ", "cyan")
+        # Stalled: the glyph and the verb both change colour, and the tail says
+        # how long the silence has lasted. Saying it in words as well as colour
+        # is not redundancy — colour is off in a pipe, on a dumb TERM, and under
+        # NO_COLOR, which are the same places a hung connection is hardest to
+        # diagnose.
+        if stalled >= STALL_AFTER_S:
+            bits.append(f"nothing received for {int(stalled)}s")
+            return (ansi.paint(f"  {frame} ", "yellow")
+                    + ansi.paint(f"{label}…", "yellow")
+                    + ansi.paint(f"  ({' · '.join(bits)})", "dim"))
+
+        # Grey, like the rows under it. The live region is one object and a
+        # coloured header on grey rows reads as two. It also follows the
+        # palette rule the rest of the TUI keeps: structure is grey, and colour
+        # is spent only on meaning — which here is the stall above, and nothing
+        # else. A spinner that is permanently cyan has spent an accent on the
+        # fact that something is running, which is the least surprising thing
+        # on the screen.
+        return (ansi.paint(f"  {frame} ", "grey")
                 + ansi.paint(f"{label}…", "bold")
                 + ansi.paint(f"  ({' · '.join(bits)})", "dim"))
 

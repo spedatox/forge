@@ -247,7 +247,11 @@ def test_the_banner_offers_what_can_be_resumed(tmp_path, monkeypatch):
                         lambda ws: [("/resume 1", "fix the retry logic  (2h ago)")])
     out = banner("Optimus", "anthropic:x", str(tmp_path), 9)
 
-    assert "Resume" in out
+    # The "Resume" section heading is gone — entries now sit under the box as
+    # `/resume 1  <title>`, which carries the same information and one thing
+    # the heading did not: the command to type. Asserting the heading was
+    # asserting the layout; this asserts what the screen is for.
+    assert "/resume 1" in out
     assert "fix the retry logic" in out
 
 

@@ -88,7 +88,10 @@ def test_bad_input_becomes_error_result():
     assert term.reason is StopReason.COMPLETED
     blocks = [b for msg in term.messages if isinstance(msg.get("content"), list)
               for b in msg["content"] if isinstance(b, dict) and b.get("type") == "tool_result"]
-    assert any(b.get("is_error") and "Invalid input" in b.get("content", "") for b in blocks)
+    # The contract is not "it said no" — it is that the refusal names the
+    # missing parameter. See warden/toolerrors.py.
+    assert any(b.get("is_error") and "`text` is missing" in b.get("content", "")
+               for b in blocks)
 
 
 # ── §6 permission & safety gate ──────────────────────────────────────────────

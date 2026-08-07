@@ -39,7 +39,39 @@ class UsageReport:
     estimated: bool = False
 
 
-ModelEvent = TextDelta | ToolUseRequest | UsageReport
+@dataclass
+class TurnEnd:
+    """Why the turn stopped, yielded last when the provider says.
+
+    **Absence means unknown, which is not the same as "it finished."** Nothing
+    downstream may read a missing TurnEnd as a clean end — a turn cut off at the
+    output cap looks exactly like a completed one from the transcript alone
+    (text, no tool-use blocks), so a harness that cannot tell them apart reports
+    half a sentence as the answer.
+
+    This is a separate event rather than a field on `UsageReport` on purpose.
+    `UsageReport` is optional by contract, and hanging the truncation signal off
+    an optional event fails open on precisely the providers least likely to
+    implement it — the wrong direction for the one signal here that can corrupt
+    work rather than waste a call.
+
+    Two sources, in the same precedence `model/errors.py` uses for classifying
+    failures: the provider's own word first, an inference second. `reason` is
+    what the provider said; `truncated_estimate` is set when it said nothing but
+    the turn's output tokens reached the cap, which is a reliable-enough tell.
+    Marked separately so nothing renders a guess as a measurement."""
+    reason: str | None = None
+    """Normalized: "end_turn", "tool_use", "max_tokens", or the provider's own
+    string when it does not map. None when the provider reported nothing."""
+
+    truncated_estimate: bool = False
+    """Inferred from output tokens reaching the configured cap."""
+
+    def truncated(self) -> bool:
+        return self.reason == "max_tokens" or self.truncated_estimate
+
+
+ModelEvent = TextDelta | ToolUseRequest | UsageReport | TurnEnd
 
 
 @runtime_checkable
@@ -55,6 +87,11 @@ class Model(Protocol):
         signal: asyncio.Event,
     ) -> AsyncIterator[ModelEvent]:
         """Stream one assistant turn. Yields TextDelta and ToolUseRequest events,
-        optionally a closing UsageReport; the generator ending marks turn
-        completion. Must honor `signal` by stopping promptly when it is set."""
+        optionally a closing UsageReport and TurnEnd; the generator ending marks
+        turn completion. Must honor `signal` by stopping promptly when it is set.
+
+        A provider that can report why the turn ended SHOULD yield TurnEnd — it
+        is the only way the loop can distinguish a finished turn from one cut
+        off at the output cap. Omitting it is permitted and costs that
+        distinction."""
         ...

@@ -176,42 +176,102 @@ def welcome(agent: str, model: str, workspace: str, tools: int,
     if c is None:
         return ""
 
-    left: list[Any] = [
-        Group(Text("▲ FORGE", style="forge.accent"),
-              Text(agent, style="forge.muted")),
+    # One column, Claude Code's shape. The previous version was two columns of
+    # labelled fields, and at any real terminal width the labels themselves got
+    # ellipsed — `cont…`, `bran…`, a model ref cut mid-word. A welcome screen
+    # that truncates its own field names is worse than one that says less, and
+    # it was saying less anyway: nothing in it could be read at a glance.
+    #
+    # So the box carries only what cannot be found elsewhere in one keystroke,
+    # left-aligned, nothing clipped. Everything else moved to `/status`, which
+    # is where a person goes when they actually want it.
+    body: list[Any] = [
+        Text.assemble(("✻ ", "forge.muted"),
+                      ("Welcome to Forge", "forge.accent"),
+                      (f"  ·  {agent}", "forge.faint")),
         Text(""),
+        # No manual indent: the Panel's own padding already provides it, and
+        # adding a second one is what made the previous version look inset from
+        # its own border.
+        Text.assemble(("/help", "forge.fg"),
+                      (" for commands, ", "forge.faint"),
+                      ("/status", "forge.fg"),
+                      (" for this session", "forge.faint")),
+        Text(""),
+        Text(f"cwd: {workspace}", style="forge.faint", overflow="fold"),
+        Text(f"{model}  ·  {tools} tools", style="forge.faint", overflow="fold"),
     ]
-    left.append(_section("Session", [("model", model), ("tools", str(tools))]
-                         + list(facts or [])))
-    left.append(Text(""))
-    left.append(Text(workspace, style="forge.faint",
-                     overflow="ellipsis", no_wrap=True))
 
-    right: list[Any] = []
-    if resume:
-        right.append(_section("Resume", resume))
-        right.append(Text(""))
-    if tips:
-        right.append(_section("Getting started", list(tips)))
-
-    # Explicit widths, not ratios. A grid with `expand` inside a fixed-width
-    # Panel has no idea what it is allowed to occupy and collapses every cell
-    # to an ellipsis — the columns have to be told.
     outer = min(c.width - 2, 88)
-    inner = outer - 6                      # borders + horizontal padding
-    gap = 3
-    left_w = max(24, (inner - gap) * 4 // 9)
-    right_w = max(20, inner - gap - left_w)
-
-    columns = Table.grid(padding=(0, gap))
-    columns.add_column(width=left_w, overflow="ellipsis")
-    columns.add_column(width=right_w, overflow="ellipsis")
-    columns.add_row(Group(*left), Group(*right) if right else Text(""))
-
     return render(Padding(
-        Panel(columns, border_style="forge.faint", box=ROUNDED,
+        Panel(Group(*body), border_style="forge.faint", box=ROUNDED,
               padding=(1, 2), width=outer),
         (0, 0, 0, 1)))
+
+
+def welcome_footer(tips: tuple[tuple[str, str], ...],
+                   resume: list[tuple[str, str]] | None = None) -> str:
+    """What sits under the box: the undiscoverable keys, and what to resume.
+
+    Outside the panel deliberately. Claude Code puts its hints under the box
+    rather than inside it, and the reason holds here — inside, they are part of
+    a frame the eye reads once and then skips forever; outside, they sit in the
+    same place the transcript will occupy and read as the first line of it.
+    """
+    c = console()
+    if c is None:
+        return ""
+    rows: list[Any] = []
+    # One line each, never wrapped. A resume entry that spills onto a second
+    # line leaves its timestamp stranded on a row of its own, which reads as a
+    # separate entry — the list stops being countable at a glance, which is the
+    # only thing a list like this is for.
+    budget = max(20, min(c.width, 90) - 18)
+    if resume:
+        for key, what in resume:
+            rows.append(Text.assemble(("  " + key.ljust(13), "forge.fg"),
+                                      (_clip(what, budget), "forge.faint")))
+        rows.append(Text(""))
+    for key, what in tips:
+        rows.append(Text.assemble(("  " + key.ljust(13), "forge.fg"),
+                                  (what, "forge.faint")))
+    return render(Group(*rows)) if rows else ""
+
+
+def prompt_width() -> int:
+    c = console()
+    return min(c.width - 1, 100) if c is not None else 80
+
+
+def prompt_top() -> str:
+    """The top edge of the input frame, drawn above the line editor.
+
+    Only the top and the lead-in, never a closing edge. prompt_toolkit owns the
+    row the cursor is on and everything below it — a bottom border would be
+    drawn before the input existed and then scrolled away by the first wrapped
+    line. Two sides of a box is the most that can be honestly drawn here, and
+    it still does the one thing a rule cannot: mark where input begins as a
+    shape rather than a position.
+    """
+    c = console()
+    if c is None:
+        return ""
+    w = prompt_width()
+    return render(Text("╭" + "─" * (w - 2) + "╮", style="forge.faint")).rstrip("\n")
+
+
+def prompt_lead() -> str:
+    """The `│ > ` that opens the input row."""
+    c = console()
+    if c is None:
+        return ""
+    return render(Text.assemble(("│ ", "forge.faint"),
+                                ("> ", "forge.fg"))).rstrip("\n")
+
+
+def _clip(text: str, limit: int) -> str:
+    flat = " ".join(text.split())
+    return flat if len(flat) <= limit else flat[: max(0, limit - 1)] + "…"
 
 
 PROSE_WIDTH = 96
@@ -297,6 +357,51 @@ def tool_call(label: str, target: str) -> str:
     if target:
         line.append(f"({target})", style="forge.muted")
     return render(line)
+
+
+def live_row(label: str, target: str, elapsed: float, *, last: bool = False,
+             subagent: bool = False) -> str:
+    """One in-flight row of the live region.
+
+        ├─ ● Grep(retry_attempt)                            4s
+        └─ ◆ verify                       running the suite  31s
+
+    Claude Code's shape exactly — `├─`/`└─` connectors, the `●` bullet, the
+    `Name(target)` token — carried in Forge's greys rather than its colours.
+    The whole row is structure, and structure is grey here: nothing in it has
+    happened yet, so nothing in it has earned an accent. Colour stays reserved
+    for the two things that mean something, which are what changed and what
+    failed, and both of those are reported in scrollback once the call returns.
+
+    The elapsed time is right-aligned into its own column so a batch reads as a
+    column of durations rather than ten ragged lines. That column is the reason
+    the region exists: with ten calls in flight, the only question worth asking
+    at a glance is which one is not coming back.
+    """
+    c = console()
+    if c is None:
+        return ""
+    width = max(30, min(c.width, 100))
+    stamp = f"{elapsed:.0f}s"
+
+    grid = Table.grid(padding=(0, 0))
+    grid.add_column(width=5, no_wrap=True)                    # "  ├─ "
+    grid.add_column(overflow="ellipsis", ratio=1)             # the call
+    grid.add_column(width=len(stamp) + 2, justify="right", no_wrap=True)
+    grid.width = width
+
+    connector = Text("  " + ("└─ " if last else "├─ "), style="forge.faint")
+    body = Text()
+    # A subagent is a loop of its own, not a call — the diamond is the same
+    # glyph `render.py` already uses for harness housekeeping, so the operator
+    # does not have to learn a second vocabulary for "this is not a tool".
+    body.append("◆ " if subagent else "● ", style="forge.muted")
+    body.append(label, style="forge.fg")
+    if target:
+        body.append(f"({target})" if not subagent else f"  {target}",
+                    style="forge.faint")
+    grid.add_row(connector, body, Text(stamp, style="forge.faint"))
+    return render(grid)
 
 
 def tool_result(body: str, prefix: str = "", failed: bool = False) -> str:

@@ -139,6 +139,11 @@ class StreamRenderer:
             self.spinner.set_status(f"Running {name}")
         args = data.get("input") or {}
         target = _summarize_args(args)
+        # Into the live region as well as scrollback. The scrollback line says
+        # the call was made; the region says it has not come back yet, and with
+        # ten in flight that is the only one of the two that is actionable.
+        if self.spinner is not None and hasattr(self.spinner, "tool_started"):
+            self.spinner.tool_started(str(data.get("id")), _label(name), target)
         ansi.write()
         # `● Read(calc.py)` — verb and object in one token, at the margin.
         rendered = ui.tool_call(_label(name), target)
@@ -164,8 +169,16 @@ class StreamRenderer:
         if self._batch > 1:
             prefix = _label(self._tool_names.get(call_id, "")) + "  "
         self._in_flight.discard(call_id)
+        if self.spinner is not None and hasattr(self.spinner, "tool_finished"):
+            self.spinner.tool_finished(call_id)
         if not self._in_flight:
             self._batch = 0
+            # The batch is done and the loop is about to call the model again.
+            # Telling the spinner clears its tool flag, so the wait for the next
+            # response is watched for a stall instead of being credited to a
+            # tool that already finished.
+            if self.spinner is not None:
+                self.spinner.set_status("Thinking")
         self._last_was_harness = True
 
         display = data.get("display")
@@ -196,6 +209,58 @@ class StreamRenderer:
         _write_gutter(prefix + lines[0])
         for line in lines[1:]:
             ansi.write(_INDENT + _paint_diff_line(line))
+
+    # ── Delegated work ───────────────────────────────────────────────────────
+    def _on_subagent(self, data: Any) -> None:
+        """A child loop, reported on its own channel.
+
+        There was no handler here at all, so `subagent` events fell through the
+        `getattr(self, f"_on_{kind}")` lookup and vanished. Up to four children
+        (`subagents.MAX_CONCURRENT`) could run for minutes and produce nothing
+        on screen — the operator saw a spinner and no reason for it. The
+        subagent channel exists precisely so this work can be shown without
+        being mistaken for the parent's answer; nothing was showing it.
+
+        Only the open and the close reach scrollback. A child's own tool calls
+        would double the transcript and drown the parent's, which is the reason
+        it was given a separate channel rather than the parent's in the first
+        place — so they update the live row instead and are never committed.
+        """
+        if not isinstance(data, dict):
+            return
+        run_id = str(data.get("id", ""))
+        phase = data.get("phase")
+        agent = str(data.get("agent") or "subagent")
+        live = self.spinner if hasattr(self.spinner, "subagent_started") else None
+
+        if phase == "started":
+            self._flush_prose()
+            if live is not None:
+                live.subagent_started(run_id, agent, str(data.get("label") or ""))
+            ansi.write()
+            ansi.write(ansi.paint("◆ ", "magenta")
+                       + ansi.paint(agent, "bold")
+                       + ansi.paint("  delegated", "dim"))
+            self._last_was_harness = True
+            return
+
+        if phase == "finished":
+            if live is not None:
+                live.subagent_finished(run_id)
+            report = str(data.get("report") or "")
+            failed = not data.get("ok", True)
+            _write_gutter(_preview(report) if not self.verbose else report,
+                          failed=failed)
+            self._last_was_harness = True
+            return
+
+        # text / tool / tool_result — the child working. Live only.
+        if live is None:
+            return
+        if phase == "tool":
+            live.subagent_phase(run_id, _label(str(data.get("tool") or "")))
+        elif phase == "text":
+            live.subagent_phase(run_id, "writing its report")
 
     # ── Harness housekeeping the operator should still see ───────────────────
     def _on_compact(self, data: Any) -> None:
@@ -371,7 +436,8 @@ def banner(agent: str, model: str, workspace: str, tools: int,
     framed = ui.welcome(agent, model, workspace, tools, _TIPS if tips else (),
                         facts=_facts(workspace), resume=_resume(workspace))
     if framed:
-        return "\n" + framed + "\n"
+        footer = ui.welcome_footer(_TIPS if tips else (), _resume(workspace))
+        return "\n" + framed + ("\n" + footer if footer else "") + "\n"
     width = max(46, min(ansi.terminal_width() - 2, 78))
     inner = width - 4
 

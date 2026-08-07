@@ -18,7 +18,7 @@ import random
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
-from forge.model.base import Model, TextDelta, ToolUseRequest, UsageReport
+from forge.model.base import Model, TextDelta, ToolUseRequest, TurnEnd, UsageReport
 from forge.model.errors import ErrorClass, classify, retry_after
 from forge.warden.compaction import (
     ELIDE_AFTER_CYCLES,
@@ -28,11 +28,13 @@ from forge.warden.compaction import (
     MAX_COMPACT_FAILURES,
     elide_old_tool_results,
     find_cut,
+    operator_turns,
     rebuild,
     render_for_summary,
     summarize,
 )
 from forge.warden.dispatch import dispatch_tool, to_anthropic_tool_result
+from forge.warden.filestate import digest
 from forge.warden.ledger import TokenLedger
 from forge.warden.results import enforce_batch_budget
 from forge.warden import reminders
@@ -73,6 +75,33 @@ _VERIFY_PROMPT = (
 )
 _MAX_BACKOFF_S = 30.0
 
+# How many tracked files a staleness sweep will re-read. The cache holds 100;
+# checking all of them after every command would turn a `pytest` into a hundred
+# extra reads. The files at risk are the ones in play, and those are the ones
+# the LRU has at the front.
+_STALE_SWEEP_LIMIT = 20
+
+# How many times one job may resume a turn cut off at the output cap. Past this
+# the work is not fitting in the shape it is being written in, and a fourth
+# continuation is money spent to arrive at the same place — the loop says so and
+# stops rather than grinding.
+MAX_TRUNCATION_RESUMES = 3
+
+# Injected after a turn the provider cut off mid-flight. Told what NOT to do,
+# because the three things a model does on being told it was truncated —
+# apologise, recap, restart the paragraph — each cost another slice of the cap
+# that just ran out, and the third can loop indefinitely.
+_RESUME_TRUNCATED = (
+    "Your previous turn was cut off at the output limit — what you wrote is "
+    "incomplete, and the operator can see that it stops mid-flight.\n\n"
+    "Resume directly. Do not apologise, do not recap what you were doing, and "
+    "do not start the section again — pick up from exactly where the text "
+    "stops, mid-sentence if that is where the cut fell. Break what remains "
+    "into smaller pieces so the next turn finishes inside the limit: if you "
+    "were writing a long file, write it in parts; if you were explaining, "
+    "finish the current point and stop."
+)
+
 
 @dataclass
 class _Turn:
@@ -84,6 +113,20 @@ class _Turn:
     tool_uses: list[ToolUseRequest] = field(default_factory=list)
     usage: UsageReport | None = None
     error: Exception | None = None
+    end: TurnEnd | None = None
+    """Why the provider says the turn stopped. None when it did not say, which
+    is NOT the same as a clean end — see `truncated`."""
+
+    def truncated(self) -> bool:
+        """Whether this turn was cut off at the output cap.
+
+        False when the provider reported nothing. That is the fail-open
+        direction and it is chosen deliberately: the alternative is treating
+        every silent provider's every turn as truncated, which would resume
+        forever. The cost of this choice is that providers reporting neither
+        stop reason nor usage keep the old behaviour; the fix for them is to
+        report one, not to guess here."""
+        return self.end is not None and self.end.truncated()
 
     def assistant_message(self) -> dict[str, Any]:
         """Render the turn as one Anthropic assistant message. Empty turns still
@@ -149,7 +192,8 @@ class Warden:
         everything already said. Both are the same loop over the same state —
         only where `state.messages` begins differs, which is why this is the
         real entry point and `run` is the one-message case of it."""
-        state = LoopState(messages=list(messages), ledger=self.ledger)
+        state = LoopState(messages=list(messages), ledger=self.ledger,
+                          operator_turns=operator_turns(messages))
         tool_schemas = [t.schema() for t in self.tools.values()]
 
         while True:
@@ -216,6 +260,46 @@ class Warden:
                 return self._aborted(state)
 
             # ── Stop condition: no tool-use blocks → the model is done (§3). ──
+            # Unless it isn't. A turn cut off at the output cap has text and no
+            # tool-use blocks, which is byte-for-byte what a finished turn looks
+            # like from the transcript. Checked FIRST, before the verification
+            # nudge: an unfinished turn has not earned the question of whether
+            # its work was checked, and asking would bury the resume under a
+            # second instruction.
+            #
+            # Only the no-tool-uses case is handled here. A turn truncated
+            # mid-`tool_use` leaves that block's arguments incomplete, and that
+            # already resolves itself one layer down — the partial input fails
+            # `Args.model_validate` and comes back as a legible validation
+            # error naming the signature. Intervening here would pre-empt a
+            # better message.
+            if not turn.tool_uses and turn.truncated():
+                if state.truncation_resumes >= MAX_TRUNCATION_RESUMES:
+                    logger.warning("truncation_resumes_exhausted",
+                                   extra={"attempts": state.truncation_resumes})
+                    return self._terminal(
+                        StopReason.ERROR, state,
+                        error=f"the model's output was cut off at the token limit "
+                              f"{state.truncation_resumes + 1} times in a row; the last "
+                              f"answer is incomplete. Raise FORGE_MAX_TOKENS, or ask for "
+                              f"the work in smaller pieces.")
+                state.truncation_resumes += 1
+                # Charged as a retry: a resumed turn is not work done, and
+                # letting truncation quietly extend the iteration ceiling is
+                # the same leak `retries` exists to plug.
+                state.retries += 1
+                logger.info("turn_truncated",
+                            extra={"attempt": state.truncation_resumes,
+                                   "reason": turn.end.reason if turn.end else None})
+                await self.emit({"type": "chunk",
+                                 "data": f"\n[output limit reached — continuing "
+                                         f"({state.truncation_resumes} of "
+                                         f"{MAX_TRUNCATION_RESUMES})]\n"})
+                state.messages.append({"role": "user", "content": _RESUME_TRUNCATED})
+                state.advance(ContinueReason.RESUMED_TRUNCATED,
+                              f"attempt {state.truncation_resumes}")
+                continue
+
             if not turn.tool_uses:
                 if self._unverified(state):
                     state.verification_nudged = True
@@ -244,10 +328,18 @@ class Warden:
             # the moment it applies rather than competing with everything that
             # has happened since the system prompt was read.
             reminders.observe(self._reminders, state, turn.tool_uses, results)
-            nudge = reminders.due(self._reminders)
+            # A file moving underneath the model outranks any judgement about
+            # how the run is going: it is a fact the model cannot observe, it
+            # expires the moment it re-reads, and acting on stale contents is
+            # the more expensive of the two mistakes. Leaving `due` uncalled
+            # spends nothing — an unfired rule is still owed next turn.
+            changed = await self._external_changes(turn.tool_uses)
+            nudge = (reminders.file_changed_notice(changed) if changed
+                     else reminders.due(self._reminders))
             if nudge:
                 result_blocks = [*result_blocks, {"type": "text", "text": nudge}]
-                logger.info("reminder_fired", extra={"iteration": state.iteration})
+                logger.info("reminder_fired",
+                            extra={"iteration": state.iteration, "files": changed})
 
             state.messages.append({"role": "user", "content": result_blocks})
 
@@ -255,7 +347,56 @@ class Warden:
             if self.signal.is_set():
                 return self._aborted(state)
 
+            # Tools ran, so the loop is progressing rather than re-attempting.
+            # Whatever truncation streak was in flight is over — the next cap
+            # hit is a fresh one, not the fourth of a series.
+            state.truncation_resumes = 0
             state.advance(ContinueReason.NEXT_TURN)
+
+    # ── Noticing a file move underneath the model ────────────────────────────
+    async def _external_changes(self, tool_uses: list[ToolUseRequest]) -> list[str]:
+        """Files the model has read that no longer say what it read.
+
+        The sweep is conditional, because the cost is one filesystem read per
+        tracked file and the benefit is zero on a turn that could not have
+        changed anything. A batch of nothing but read-only calls is exactly
+        that turn, and on a long exploration it is most of them.
+
+        `write_file` and `edit_file` are not excluded and do not need to be:
+        both re-record their own new state, so a file they just wrote matches
+        what the model was told and reports nothing. The turns that DO pay for
+        this are the ones that ran a command, spawned a subagent, or entered a
+        worktree — which is the same list as the ways a file actually changes.
+
+        Bounded twice over: to the most recently used entries, and to whatever
+        the Cell can still read. A file that vanished says nothing here —
+        read-before-write will say it at the edit, where it is actionable.
+        """
+        cell = getattr(self.ctx, "cell", None)
+        if cell is None or not self._could_have_touched_the_tree(tool_uses):
+            return []
+
+        changed: list[str] = []
+        for path in self.ctx.files.tracked(limit=_STALE_SWEEP_LIMIT):
+            try:
+                content = await cell.read(path)
+            except Exception:  # noqa: BLE001, S112 — see docstring: not this rule's business
+                continue
+            if self.ctx.files.note_external_change(path, digest(content)):
+                changed.append(path)
+        return changed
+
+    def _could_have_touched_the_tree(self, tool_uses: list[ToolUseRequest]) -> bool:
+        """Whether anything in this batch could have written to the workspace.
+
+        Read from the class constant rather than the per-input override, and
+        deliberately: `run_command` answers `is_read_only` per command, so
+        `git status` would say no and skip the sweep. It would usually be
+        right. The cost of being wrong in that direction is a stale edit; the
+        cost of being wrong the other way is one extra stat-shaped read. Take
+        the over-approximation."""
+        return any(t is not None and not t.READ_ONLY
+                   for t in (self.tools.get(tu.name) for tu in tool_uses))
 
     # ── Seam 1: the toolset can change between turns ─────────────────────────
     async def _refresh_tools(self) -> bool:
@@ -340,7 +481,8 @@ class Warden:
                 self._forget_files()
             return bool(freed)
 
-        state.messages = rebuild(state.messages, cut, self._carry_plan(summary))
+        state.messages = rebuild(state.messages, cut, self._carry_plan(summary),
+                                 state.operator_turns)
         state.compact_failures = 0
         self._forget_files()
         await self.emit({"type": "compact",
@@ -469,6 +611,8 @@ class Warden:
                                      "data": {"id": ev.id, "name": ev.name, "input": ev.input}})
                 elif isinstance(ev, UsageReport):
                     turn.usage = ev
+                elif isinstance(ev, TurnEnd):
+                    turn.end = ev
         except Exception as e:  # noqa: BLE001 — classified at the failure boundary
             turn.error = e
         turn.text = "".join(text_buf)

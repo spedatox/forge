@@ -132,6 +132,73 @@ def elide_old_tool_results(
     return out, freed
 
 
+# ── What summarization is not allowed to paraphrase ──────────────────────────
+# The summary prompt asks for the operator's instructions verbatim, and a
+# capable model obliges. A rule the model can decline is not a mechanism,
+# though, and this is the one place where declining it is invisible: the
+# session does not error, it quietly starts working on a slightly different
+# problem than the one that was asked for. On a six-hour run that is the
+# difference between finishing and drifting.
+#
+# So the operator's turns are carried by the harness, which cannot paraphrase
+# because it is not reading them. The prompt still asks — belt and braces, and
+# the model's rendering has context the copy does not.
+OPERATOR_TURNS_CAP = 4_000
+
+
+def operator_turns(messages: list[dict[str, Any]]) -> list[str]:
+    """The operator's own words, in order, from a transcript slice.
+
+    A user-role message is the operator's only if it is not carrying tool
+    results. That single test is exact here rather than heuristic: the loop's
+    own user-role injections — the verification nudge, the wind-down request,
+    the interrupt marker — are all appended after a run begins, while the
+    operator's turns arrive only in the transcript a run is seeded with. Which
+    means the caller decides what to pass, and the caller knows.
+    """
+    out: list[str] = []
+    for message in messages:
+        if message.get("role") != "user" or is_tool_result_message(message):
+            continue
+        content = message.get("content")
+        text = (content if isinstance(content, str)
+                else "\n".join(b.get("text", "") for b in _blocks(message)
+                               if b.get("type") == "text"))
+        if text and text.strip():
+            out.append(text.strip())
+    return out
+
+
+def render_operator_turns(turns: list[str], cap: int = OPERATOR_TURNS_CAP) -> str:
+    """Turns as a verbatim block, newest-first under a size ceiling.
+
+    Dropped from the OLDEST end when it will not fit, which is the opposite of
+    how the rest of compaction treats age. Deliberate: an operator's later
+    instruction usually supersedes an earlier one, so if intent has to be lost
+    it should be the intent that was already overtaken. The drop is stated
+    rather than silent — a summary that has quietly shed half the brief while
+    reading as complete is worse than one that admits the gap."""
+    if not turns:
+        return ""
+    kept: list[str] = []
+    budget = cap
+    for turn in reversed(turns):
+        if len(turn) > budget:
+            break
+        kept.append(turn)
+        budget -= len(turn)
+    kept.reverse()
+    dropped = len(turns) - len(kept)
+    if not kept:
+        return ""
+    body = "\n\n".join(f"> {t}" for t in kept)
+    note = (f"[{dropped} earlier operator message(s) omitted for length]\n\n"
+            if dropped else "")
+    return ("EVERY INSTRUCTION THE OPERATOR GAVE, VERBATIM — carried through "
+            "compaction unaltered, because a paraphrase of intent is a change "
+            "to it:\n\n" + note + body)
+
+
 # ── Layer two: summarization ─────────────────────────────────────────────────
 def find_cut(messages: list[dict[str, Any]], keep_cycles: int = KEEP_CYCLES) -> int | None:
     """Index where the preserved tail begins, or None if there is nothing to gain.
@@ -201,18 +268,25 @@ async def summarize(model: Model, transcript: str, signal: asyncio.Event) -> str
 
 
 def rebuild(
-    messages: list[dict[str, Any]], cut: int, summary: str
+    messages: list[dict[str, Any]], cut: int, summary: str,
+    said: list[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """(task + summary) as one message, then the verbatim tail.
+    """(task + summary + what the operator said) as one message, then the tail.
 
     The task and the summary are merged rather than kept as two messages: the
     tail begins with an assistant turn, so a separate summary message would put
     two user messages back to back. Merging keeps the transcript strictly
     alternating and keeps the original instruction where it has always been —
-    first, and never summarized."""
+    first, and never summarized.
+
+    `said` is every operator turn, copied rather than summarized. Turns already
+    inside the preserved head are dropped: the first one is the task itself, and
+    on a second compaction the head already contains the block this produced —
+    without the check, each pass would stack another copy of the same words."""
     replaced = len(messages[1:cut])
     head = messages[0].get("content")
     task = head if isinstance(head, str) else render_for_summary([messages[0]])
+    verbatim = render_operator_turns([t for t in (said or []) if t not in task])
     return [
         {
             "role": "user",
@@ -220,10 +294,11 @@ def rebuild(
                 f"{task}\n\n"
                 f"[COMPACTED — {replaced} earlier messages replaced by this summary]\n\n"
                 f"{summary}\n\n"
-                f"[The transcript resumes below. Every file on disk reflects ALL of "
-                f"the work above, including the summarized part. Re-read any file "
-                f"before editing it — your memory of its contents is this summary's, "
-                f"not the file's.]"
+                + (f"{verbatim}\n\n" if verbatim else "")
+                + "[The transcript resumes below. Every file on disk reflects ALL of "
+                "the work above, including the summarized part. Re-read any file "
+                "before editing it — your memory of its contents is this summary's, "
+                "not the file's.]"
             ),
         },
         *messages[cut:],

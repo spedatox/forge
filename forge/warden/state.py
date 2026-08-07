@@ -38,6 +38,7 @@ class ContinueReason(str, enum.Enum):
     NEXT_TURN = "next_turn"          # tools executed, results appended, continue
     RETRY_TRANSIENT = "retry_transient"   # the stream failed in a way that may not recur
     RECOVERED_CONTEXT = "recovered_context"   # the window was full; it was made smaller
+    RESUMED_TRUNCATED = "resumed_truncated"   # the turn hit the output cap; finish it
 
 
 @dataclass(frozen=True)
@@ -63,6 +64,13 @@ class LoopState:
     and charging it against the ceiling lets a flaky provider quietly shorten
     every job it touches. Never reset — the budget it protects is cumulative."""
 
+    operator_turns: list[str] = field(default_factory=list)
+    """Everything the operator said, captured before the loop starts adding its
+    own user-role messages. Carried verbatim through every compaction: intent
+    lives in these words and a paraphrase of intent is a change to it. Captured
+    once, at the seed, because from that point on every user message the
+    transcript grows is the harness talking to itself."""
+
     wrote_at: int = 0
     """Iteration of the most recent change to a file. 0 = nothing written yet."""
 
@@ -81,6 +89,16 @@ class LoopState:
     stops trying: a context that cannot be reduced will not become reducible on
     the fourth attempt, and an unbounded compaction retry is a money fire rather
     than a resilience feature."""
+
+    truncation_resumes: int = 0
+    """*Consecutive* turns cut off at the output cap and resumed.
+
+    Consecutive rather than cumulative, and reset by any turn that runs tools:
+    a long job that writes three big files legitimately hits the cap three
+    times, an hour apart, and each is one recovery rather than a third of a
+    budget. What the limit is really bounding is the spiral — a model that
+    answers 'continue' by restarting the same paragraph, which truncates again
+    at the same place, forever."""
 
     retry_attempt: int = 0
     """*Consecutive* failed attempts at the current turn. Reset by any turn that

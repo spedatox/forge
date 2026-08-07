@@ -14,6 +14,10 @@ this repository, not to a principle someone thought sounded good:
 - an agent wrote a tool, ran it, got a number that was wrong by an order of
   magnitude, and wrote a paragraph explaining the number instead of checking it
 - an agent edited files across a long job and never ran anything
+- an agent ran a formatter, then edited a file against the version it had read
+  before the formatter touched it (see `file_changed_notice`, which is a
+  statement of fact rather than a rule, and so is exempt from the first
+  constraint below)
 
 Three constraints keep them from becoming wallpaper, which is the only way a
 reminder system fails:
@@ -124,6 +128,40 @@ REMINDERS: tuple[Reminder, ...] = (
     Reminder("unverified_changes", _unverified, _unverified_text),
     Reminder("no_plan", _unplanned, _unplanned_text),
 )
+
+
+def file_changed_notice(paths: list[str]) -> str:
+    """Files the model has read that something else has since rewritten.
+
+    Not a rule in REMINDERS, and not subject to the once-per-job restraint the
+    rules live under, because it is a different kind of statement. A rule is a
+    judgement about how the run is going, and repeating a judgement is nagging.
+    This is a fact about the workspace that the model cannot observe and that
+    stops being true the moment it re-reads. Suppressing the second occurrence
+    would mean the second formatter run goes unannounced — which is precisely
+    when an edit lands on text nobody has looked at.
+
+    A linter, a formatter, a build step, the operator in their editor, or a
+    subagent working in the same tree: all of them move a file out from under a
+    read the model still believes in. Without this the model edits against what
+    it saw ten minutes ago, and the edit either fails on a stale match or
+    silently reverts somebody else's change — the second being much the worse,
+    because it looks like it worked.
+    """
+    listed = "\n".join(f"  - {p}" for p in paths)
+    changed = "This file has" if len(paths) == 1 else "These files have"
+    return (
+        "<system-reminder>\n"
+        f"{changed} changed on disk since you read {'it' if len(paths) == 1 else 'them'}, "
+        "and not because of anything you did:\n\n"
+        f"{listed}\n\n"
+        "Something else wrote there — a formatter or linter you ran, a build "
+        "step, a subagent, or the operator. What you remember of "
+        f"{'this file' if len(paths) == 1 else 'these files'} is now out of "
+        "date. Read again before editing, and before drawing any conclusion "
+        "from the contents.\n"
+        "</system-reminder>"
+    )
 
 
 def due(state: ReminderState) -> str | None:

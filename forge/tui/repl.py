@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
+from dataclasses import replace
 from pathlib import Path
 
 from forge.agents.registry import AgentRegistry
@@ -31,10 +33,11 @@ from forge.gate.protocol import JobRequest
 from forge.tui import ansi
 from forge.tui.commands import command_help, resolve as resolve_command
 from forge.tui.render import StreamRenderer, banner, humanize_error
+from forge.tui import input as input_mod
 from forge.tui.input import InputBar
 from forge.tui.session import Session
-from forge.tui.spinner import Spinner
-from forge.tui import persistence, status, ui
+from forge.tui.live import LiveRegion
+from forge.tui import notify, persistence, status, ui
 from forge.warden.compaction import (
     elide_old_tool_results,
     find_cut,
@@ -133,15 +136,22 @@ async def _loop(session: Session, settings: ForgeSettings, extensions, verbose: 
         # a header for what is about to be typed, which is the wrong tense:
         # `106 in / 39 out` describes the turn that just finished.
         ansi.write()
-        ansi.write(ansi.paint("─" * max(10, ansi.terminal_width() - 1), "dim"))
         status.write(session)
-        ansi.write()
-        entry = await bar.read(ansi.paint("› ", "cyan"))
+        # Claude Code frames its input; the rule Forge drew above the status
+        # line was doing the same job — separating the exchange above from what
+        # is about to be typed — with a horizontal line instead of a box. The
+        # box does it better because it also marks where the input ENDS, which
+        # a rule cannot: with a bare `›` a wrapped three-line paste and the
+        # transcript above it are the same shape.
+        ansi.write(ui.prompt_top() or ansi.paint(
+            "─" * max(10, ansi.terminal_width() - 1), "dim"))
+        entry = await bar.read(ui.prompt_lead() or ansi.paint("› ", "grey"))
         if entry.is_eof:
             ansi.write()
             return 0
         if not entry.text:
             continue
+        entry = _fold_if_huge(entry, session)
         _echo_prompt(entry.text)
 
         if entry.kind == "command":
@@ -155,6 +165,30 @@ async def _loop(session: Session, settings: ForgeSettings, extensions, verbose: 
             await _run_bash(entry.text, session)
         else:
             await _run_turn(entry.text, session, settings, extensions, verbose)
+
+
+def _fold_if_huge(entry, session: Session):
+    """Fold an oversized paste before it becomes a turn.
+
+    Only for prompts. A `!command` that long is the operator's business and
+    folding it would corrupt the command; a `/command` that long is a typo.
+
+    The operator is told, and in the same breath told where the rest went —
+    a paste that silently loses its middle is worse than one that is refused,
+    because the model answers confidently about text it never saw.
+    """
+    if entry.kind != "prompt" or len(entry.text) <= input_mod.PASTE_THRESHOLD:
+        return entry
+    spill = session.workspace / ".forge" / "pastes" / f"{session.session_id}-{session.turns}.txt"
+    folded, withheld = input_mod.fold_paste(entry.text, spill_path=spill)
+    if not withheld:
+        return entry
+    ansi.write(ansi.paint(
+        f"  ⚠ that paste was {len(entry.text):,} characters — sending the first and "
+        f"last {input_mod.PASTE_KEEP} with the middle elided", "yellow"))
+    if spill.exists():
+        ansi.write(ansi.paint(f"    full text: {spill}", "dim"))
+    return replace(entry, text=folded)
 
 
 def _echo_prompt(text: str) -> None:
@@ -265,9 +299,11 @@ async def _run_command(line: str, session: Session) -> "bool | str":
         ansi.write(result.text)
     if result.clear:
         session.reset()
+        status.forget_pressure(session)
         ansi.write(ansi.paint("  conversation cleared", "grey"))
     if result.compact:
         await _compact_now(session)
+        status.forget_pressure(session)
     if result.quit:
         return True
     return result.prompt or False
@@ -308,7 +344,7 @@ def _build_model(session: Session):
 async def _run_turn(prompt: str, session: Session, settings: ForgeSettings,
                     extensions, verbose: bool) -> None:
     signal = asyncio.Event()
-    spinner = Spinner()
+    spinner = LiveRegion()
     # The oracle has to be able to stop the live line: a permission prompt is
     # printed and then repainted over several times a second, which erases the
     # question and everything typed into it. A new Spinner exists per turn, so
@@ -373,6 +409,7 @@ async def _run_turn(prompt: str, session: Session, settings: ForgeSettings,
     # Continue the conversation rather than starting one: seed the loop with
     # everything said so far, so turn nine remembers turn three.
     warden_task = asyncio.create_task(_drive(warden, session, prompt))
+    started = time.monotonic()
     spinner.start()
     try:
         terminal = await asyncio.shield(warden_task)
@@ -395,7 +432,8 @@ async def _run_turn(prompt: str, session: Session, settings: ForgeSettings,
     session.messages = list(terminal.messages)
     session.turns += 1
     persistence.save(session, session.session_id)
-    _report(terminal, session, verbose, already_shown=renderer.saw_error)
+    _report(terminal, session, verbose, already_shown=renderer.saw_error,
+            seconds=time.monotonic() - started)
 
 
 async def _drive(warden: Warden, session: Session, prompt: str):
@@ -426,7 +464,39 @@ def _system_prompt(session: Session, extensions) -> str:
     ])
 
 
-def _report(terminal, session: Session, verbose: bool, already_shown: bool = False) -> None:
+def _turn_summary(terminal, session: Session, seconds: float) -> str:
+    """The one line that closes a completed turn.
+
+    Forge reported nothing at all on the successful path: the operator learned
+    what a turn cost by running `/cost` afterwards, which in practice means
+    never. Duration and iterations are the two numbers that change the next
+    decision — whether to ask for less, and whether the loop is grinding.
+
+    Context percentage rides along only once it is worth acting on. Below the
+    warning line it is already on the status line above the prompt, and saying
+    it twice per turn is how a number becomes furniture."""
+    bits = [f"{_duration(seconds)}"]
+    if terminal.iterations > 1:
+        bits.append(f"{terminal.iterations} steps")
+    usage = terminal.usage or {}
+    out = usage.get("output", 0)
+    if out:
+        bits.append(f"{out:,} tokens out")
+    fullness = usage.get("fullness") or 0
+    if fullness >= status.WARN_FULLNESS:
+        bits.append(f"{int(100 * fullness)}% context")
+    return "  " + " · ".join(bits)
+
+
+def _duration(seconds: float) -> str:
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    minutes, rest = divmod(int(seconds), 60)
+    return f"{minutes}m {rest:02d}s"
+
+
+def _report(terminal, session: Session, verbose: bool, already_shown: bool = False,
+            seconds: float = 0.0) -> None:
     if terminal.reason is StopReason.ABORTED:
         ansi.write(ansi.paint("  ⏹ stopped", "yellow"))
     elif terminal.reason is StopReason.MAX_ITERATIONS:
@@ -450,3 +520,16 @@ def _report(terminal, session: Session, verbose: bool, already_shown: bool = Fal
         ansi.write(ansi.paint(
             f"  {terminal.iterations} iterations · {usage.get('prompt', 0):,} tokens in context",
             "dim"))
+    elif seconds:
+        ansi.write(ansi.paint(_turn_summary(terminal, session, seconds), "dim"))
+
+    # Said once, on the crossing, and never again for this session unless the
+    # context is reclaimed. The status line already carries the percentage on
+    # every prompt; what it cannot do is mark the moment the number started
+    # mattering, because a gauge that is always present is read as furniture.
+    if (warning := status.pressure_warning(session)):
+        ansi.write(ansi.paint(f"  ⚠ {warning}", "yellow"))
+
+    # Last, so the terminal's attention flag lands after everything worth
+    # reading is already on screen.
+    notify.finished(seconds, _turn_summary(terminal, session, seconds).strip())

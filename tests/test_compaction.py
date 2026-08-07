@@ -20,8 +20,10 @@ from forge.warden.compaction import (
     find_cut,
     is_tool_result_message,
     opens_a_cycle,
+    operator_turns,
     rebuild,
     render_for_summary,
+    render_operator_turns,
 )
 from forge.warden.engine import Warden
 from forge.warden.filestate import FileStateCache
@@ -118,6 +120,84 @@ def test_the_task_survives_and_the_tail_is_verbatim():
 def test_the_summary_tells_the_model_its_file_memory_is_stale():
     out = rebuild(make_transcript(10), find_cut(make_transcript(10), 3), "S")
     assert "Re-read any file before editing it" in out[0]["content"]
+
+
+# ── Intent, which is not the summarizer's to paraphrase ──────────────────────
+# Compaction failure is invisible: the session does not error, it gradually
+# starts working on a slightly different problem than the one asked for. The
+# summary prompt asks for the operator's words verbatim, but a rule the model
+# can decline is not a mechanism — so the harness copies them itself.
+def _with_operator_turns(*turns: str) -> list[dict[str, Any]]:
+    """A transcript in which the operator spoke again mid-run."""
+    messages = make_transcript(10)
+    for i, turn in enumerate(turns):
+        messages.insert(3 + i * 2, {"role": "user", "content": turn})
+    return messages
+
+
+def test_the_operators_own_words_are_carried_not_summarized():
+    said = ["do the thing", "actually, use tabs not spaces"]
+    out = rebuild(make_transcript(10), find_cut(make_transcript(10), 3), "S", said)
+    assert "actually, use tabs not spaces" in out[0]["content"]
+
+
+def test_the_carried_block_says_it_is_verbatim():
+    """A copy the model reads as the summarizer's paraphrase is a copy it feels
+    free to re-interpret."""
+    out = rebuild(make_transcript(10), find_cut(make_transcript(10), 3), "S", ["x y z"])
+    assert "VERBATIM" in out[0]["content"]
+
+
+def test_only_the_operators_messages_are_collected():
+    """Tool results are user-role too, and they are the bulk of a transcript."""
+    turns = operator_turns(_with_operator_turns("change of plan"))
+    assert turns == ["the original task", "change of plan"]
+
+
+def test_text_blocks_in_a_user_message_count():
+    turns = operator_turns([{"role": "user",
+                             "content": [{"type": "text", "text": "  do it  "}]}])
+    assert turns == ["do it"]
+
+
+def test_the_task_is_not_carried_twice():
+    """It is already preserved verbatim as the head. Repeating it costs tokens
+    to say nothing."""
+    out = rebuild(make_transcript(10), find_cut(make_transcript(10), 3), "S",
+                  ["the original task", "and also this"])
+    assert out[0]["content"].count("the original task") == 1
+    assert "and also this" in out[0]["content"]
+
+
+def test_a_second_compaction_does_not_stack_another_copy():
+    """The head after one pass already contains the carried block; without the
+    check, every pass would append the same words again."""
+    said = ["first ask", "second ask"]
+    once = rebuild(make_transcript(10), find_cut(make_transcript(10), 3), "S", said)
+    twice = rebuild([once[0], *make_transcript(10)[1:]],
+                    find_cut(make_transcript(10), 3), "S2", said)
+    assert twice[0]["content"].count("second ask") == 1
+
+
+def test_an_oversized_history_drops_the_oldest_and_says_so():
+    """If intent has to be lost it should be the intent already superseded —
+    and a block that quietly shed half the brief is worse than one that admits
+    it."""
+    block = render_operator_turns(["old " * 400, "the latest instruction"], cap=200)
+    assert "the latest instruction" in block
+    assert "old" not in block
+    assert "omitted for length" in block
+
+
+def test_no_operator_turns_means_no_block():
+    out = rebuild(make_transcript(10), find_cut(make_transcript(10), 3), "S", [])
+    assert "VERBATIM" not in out[0]["content"]
+
+
+def test_carrying_intent_keeps_the_transcript_well_formed():
+    messages = _with_operator_turns("one", "two")
+    cut = find_cut(messages, keep_cycles=3)
+    assert_well_formed(rebuild(messages, cut, "S", operator_turns(messages)))
 
 
 # ── Elision, the cheap layer ─────────────────────────────────────────────────
@@ -286,6 +366,24 @@ def test_a_context_length_refusal_is_recovered_not_surfaced():
     assert term.reason is StopReason.COMPLETED
     assert term.final_text == "finished after recovering"
     assert ContinueReason.RECOVERED_CONTEXT in [t.reason for t in term.transitions]
+
+
+def test_the_operators_later_instruction_survives_a_real_compaction():
+    """Wired, not merely written. The summarizer here writes a summary that
+    mentions none of it — which is the exact failure the copy exists to survive,
+    and a mechanism nothing reaches is prose with extra steps."""
+    model = Overflowing()
+    term = asyncio.run(_warden(model).run_messages([
+        {"role": "user", "content": "go"},
+        {"role": "assistant", "content": [{"type": "text", "text": "starting"}]},
+        {"role": "user", "content": "one more thing: never touch config.yaml"},
+    ]))
+
+    assert term.reason is StopReason.COMPLETED
+    assert ContinueReason.RECOVERED_CONTEXT in [t.reason for t in term.transitions]
+    head = str(term.messages[0]["content"])
+    assert "summary of the earlier work" in head       # compaction really ran
+    assert "never touch config.yaml" in head           # and intent came through it
 
 
 def test_compaction_gives_up_rather_than_looping_forever():

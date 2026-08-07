@@ -214,6 +214,11 @@ class Session:
     turns: int = 0
     _mode: str = ""
     last_truncated: tuple[str, str] | None = None
+    context_warned: bool = False
+    """Whether this session has already been told its context is filling up.
+    Lives here rather than in a module-level registry because the alternative —
+    keying on `id(session)` — silently misfires when CPython reuses an address.
+    Cleared by `/clear` and `/compact`; see `status.forget_pressure`."""
     input_bar: Any = None
     session_id: str = ""
     """Filename this conversation persists to. A resumed session keeps its

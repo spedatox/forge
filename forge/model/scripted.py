@@ -12,7 +12,7 @@ import asyncio
 import uuid
 from typing import Any, AsyncIterator, Callable
 
-from forge.model.base import TextDelta, ToolUseRequest
+from forge.model.base import ModelEvent, TextDelta, ToolUseRequest, TurnEnd
 
 Step = Callable[[list[dict[str, Any]]], "tuple[str, list[ToolUseRequest]]"]
 
@@ -24,13 +24,18 @@ def tool_call(name: str, **kwargs: Any) -> ToolUseRequest:
 class ScriptedModel:
     model_id = "scripted-forge"
 
-    def __init__(self, steps: list[Step]) -> None:
+    def __init__(self, steps: list[Step], ends: list[str | None] | None = None) -> None:
         self._steps = steps
         self._i = 0
+        self._ends = ends or []
+        """Per-step stop reason, positionally. Lets a test script a turn that was
+        cut off at the output cap — the one turn shape the transcript alone
+        cannot distinguish from a finished one. Absent or None means the step
+        reports nothing, which is also what most providers do."""
 
     async def stream(self, *, system: str, messages: list[dict[str, Any]],
                      tools: list[dict[str, Any]], signal: asyncio.Event
-                     ) -> AsyncIterator[TextDelta | ToolUseRequest]:
+                     ) -> AsyncIterator[ModelEvent]:
         if signal.is_set():
             return
         if self._i >= len(self._steps):
@@ -38,9 +43,11 @@ class ScriptedModel:
             # is the loop's completion signal.
             for chunk in _stream_text("The task is complete."):
                 yield TextDelta(chunk)
+            yield TurnEnd(reason="end_turn")
             return
 
-        step = self._steps[self._i]
+        i = self._i
+        step = self._steps[i]
         self._i += 1
         text, calls = step(messages)
 
@@ -49,6 +56,9 @@ class ScriptedModel:
             await asyncio.sleep(0)      # give the event loop a beat so streaming is observable
         for call in calls:
             yield call
+        end = self._ends[i] if i < len(self._ends) else None
+        if end is not None:
+            yield TurnEnd(reason=end)
 
 
 def _stream_text(text: str, width: int = 24) -> list[str]:

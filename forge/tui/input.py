@@ -66,6 +66,66 @@ being a menu and becomes a page: it covers the transcript, and choosing
 from it costs more than typing the name would have."""
 
 HISTORY_LIMIT = 2_000
+
+# ctrl-c twice, inside this window, leaves the session. One press clears the
+# line and says so.
+#
+# ctrl-c ctrl-c is most terminal users' reflex for "get me out", and before this
+# it did nothing at all here: the handler returned an empty prompt and the loop
+# redrew. Ctrl-d worked and was the only way, which is discoverable only by
+# knowing it. The confirmation exists because the same reflex is also how people
+# abandon a half-typed line, and exiting on that would lose a session to a
+# keystroke meant to clear a typo.
+DOUBLE_PRESS_S = 1.5
+
+PASTE_THRESHOLD = 10_000
+"""Characters above which an input is folded before it is sent.
+
+Pasting a stack trace, a log, or a CSV at a prompt is an ordinary thing to do,
+and until now all of it went to the model verbatim — a 200k-character paste
+spends the window in one turn and the only thing that notices is the ledger,
+afterwards. The reference draws the same line at the same number."""
+
+PASTE_KEEP = 500
+"""Kept from each end. Enough that the head still identifies what was pasted and
+the tail still shows how it ended, which between them is what a person actually
+refers to when they paste something and ask about it."""
+
+
+def fold_paste(text: str, spill_path: Path | None = None,
+               threshold: int = PASTE_THRESHOLD,
+               keep: int = PASTE_KEEP) -> tuple[str, str]:
+    """Split an oversized input into (what to send, what was withheld).
+
+    Returns the text unchanged and an empty remainder when it is under the
+    threshold, so callers can apply it unconditionally.
+
+    The placeholder counts the elided LINES rather than characters, because
+    lines are the unit a person paste-estimates in — "+4,000 lines" lands, and
+    "+182,331 characters" does not.
+
+    When `spill_path` is given the FULL text is written there and the
+    placeholder names it. Withholding text and saying nothing about where it
+    went would make the message a quiet lie about what was provided; a path
+    turns the elision into something the model can undo with one `read_file`.
+    It is the same contract oversized tool results already have.
+    """
+    if len(text) <= threshold:
+        return text, ""
+    head, tail = text[:keep], text[-keep:]
+    middle = text[keep:-keep]
+    lines = middle.count("\n") + 1
+
+    where = ""
+    if spill_path is not None:
+        try:
+            spill_path.parent.mkdir(parents=True, exist_ok=True)
+            spill_path.write_text(text, encoding="utf-8")
+            where = f" — the full text is at {spill_path}"
+        except OSError:
+            where = ""     # unwritable workspace: fold anyway, say less
+    return (f"{head}\n\n[… {lines:,} lines elided from this paste{where} …]\n\n{tail}",
+            middle)
 # Directories that are never worth offering as an @-mention. Walking them is
 # slow and every hit is noise.
 _SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", ".forge",
@@ -220,6 +280,7 @@ class InputBar:
         self._on_cycle_mode = on_cycle_mode
         self._on_toggle_expand = on_toggle_expand
         self._session = None
+        self._last_interrupt = 0.0
         self.degraded_reason = "" if AVAILABLE else "prompt_toolkit is not installed"
         if AVAILABLE:
             try:
@@ -395,7 +456,14 @@ class InputBar:
     # ── reading ──────────────────────────────────────────────────────────────
 
     async def read(self, prompt_ansi: str) -> Submission:
-        """One submission. Ctrl-D (or ctrl+C at an empty line) ends the session."""
+        """One submission. Ctrl-D ends the session; so does ctrl-C twice.
+
+        The docstring here used to claim ctrl-C at an empty line ended the
+        session. It did not — the handler returned an empty prompt and the loop
+        redrew, so the only exit was ctrl-D and the only way to find it was to
+        already know. Now the reflex works, with a confirmation, because the
+        same keystroke is how people abandon a half-typed line.
+        """
         if self._session is None:
             return await self._read_plain(prompt_ansi)
         try:
@@ -404,9 +472,28 @@ class InputBar:
         except EOFError:
             return Submission("eof", "")
         except KeyboardInterrupt:
-            # An empty line means "I am done"; a typed line means "scrap it".
+            if self._interrupt_again():
+                return Submission("eof", "")
             return Submission("prompt", "")
+        self._last_interrupt = 0.0     # any real submission ends the streak
         return classify(line)
+
+    def _interrupt_again(self) -> bool:
+        """True when this ctrl-C is the second within the window.
+
+        Prints the confirmation itself rather than returning a flag for the
+        caller to render: the prompt is about to be redrawn over this line, so
+        the notice has to be written before returning or it never appears.
+        """
+        import time
+
+        now = time.monotonic()
+        if now - self._last_interrupt <= DOUBLE_PRESS_S:
+            self._last_interrupt = 0.0
+            return True
+        self._last_interrupt = now
+        print("  press ctrl-c again to exit, or ctrl-d", flush=True)
+        return False
 
     async def _read_plain(self, prompt_ansi: str) -> Submission:
         import asyncio

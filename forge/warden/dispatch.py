@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from dataclasses import replace
 from typing import Any
 
 from pydantic import ValidationError
@@ -19,6 +20,7 @@ from forge.warden.hooks import run_post_tool, run_pre_tool
 from forge.warden.permissions import Decision
 from forge.warden.results import cap_result
 from forge.warden.tool import Tool, ToolContext, ToolResult
+from forge.warden.toolerrors import format_validation_error
 
 logger = logging.getLogger("forge.warden")
 
@@ -43,6 +45,24 @@ DENIAL_GUIDANCE = (
     "quietly doing something adjacent and reporting success is not."
 )
 
+# The denial's counterpart, and the more dangerous half. A refusal is at least
+# self-limiting: it stops one call and the model has to think again. An approval
+# is the thing that generalises on its own — "they let me force-push" quietly
+# becomes a standing belief about force-pushing, and the second one is never put
+# to anybody.
+#
+# The gate already asks per action and records the EXACT action string when the
+# operator says always. What it did not do is tell the model that. Said here, at
+# the only moment it is concrete: attached to the call that was just approved.
+APPROVAL_SCOPE = (
+    "The operator approved this specific action, in this context, once. That "
+    "approval does not extend to the next action of the same kind, to the same "
+    "action on a different target, or to a broader version of it — a yes to one "
+    "irreversible operation is not a policy about irreversible operations. If "
+    "you need something like this again, ask again and let the gate stop you; "
+    "do not reason from having been permitted before."
+)
+
 
 async def dispatch_tool(
     tools: dict[str, Tool],
@@ -59,16 +79,23 @@ async def dispatch_tool(
         available = ", ".join(sorted(tools)) or "(none)"
         return ToolResult(f"Unknown tool {name!r}. Available tools: {available}.", is_error=True)
 
-    # 2. Validate input against the schema.
+    # 2. Validate input against the schema. A rejected call is answered with the
+    #    call it should have made — see warden/toolerrors.py for why the raw
+    #    Pydantic text is not an acceptable thing to hand a model.
     try:
         args = tool.Args.model_validate(raw_input)
     except ValidationError as e:
-        return ToolResult(f"Invalid input for {name!r}: {e}", is_error=True)
+        return ToolResult(format_validation_error(name, e, tool.Args), is_error=True)
 
     # 3. Permit (deny → is_error; ask → put it to the operator).
     decision = ctx.permissions.resolve(tool, args, ctx)
+    freshly_approved = False
     if decision.needs_ask:
         decision = await _ask(tool, name, args, decision, ctx)
+        # Remembered before the decision is consumed: this is the one call the
+        # operator personally cleared, and the only place the scope of that yes
+        # can be stated without guessing at it later.
+        freshly_approved = decision.allowed
     if not decision.allowed:
         return ToolResult(
             f"Permission denied for {name!r}: {decision.reason}\n\n{DENIAL_GUIDANCE}",
@@ -102,7 +129,18 @@ async def dispatch_tool(
         result = await tool.call(args, ctx)
     except Exception as e:  # noqa: BLE001 — the loop's safety net
         logger.warning("tool_call_raised", extra={"tool": name, "error": repr(e)})
-        return ToolResult(f"<tool_error>{type(e).__name__}: {e}</tool_error>", is_error=True)
+        # Say whose fault this is. A traceback class name reads to the model as
+        # "you called it wrong", and the correction it invents is another call
+        # with different arguments — which cannot help, because the arguments
+        # already passed validation. The tool broke; the way through is a
+        # different route or an honest report, not a reshaped retry.
+        return ToolResult(
+            f"<tool_error>{type(e).__name__}: {e}</tool_error>\n"
+            f"This is a fault inside {name} itself, not a problem with your "
+            f"arguments — they were valid. Retrying the same call will raise "
+            f"the same way. Use a different tool or approach if one exists, and "
+            f"if none does, report that {name} is broken and what you needed "
+            f"from it.", is_error=True)
 
     # 4b. post_tool hooks (Seam 3), BEFORE capping — a redactor should act on
     #     what was produced, not on a preview of it.
@@ -111,7 +149,13 @@ async def dispatch_tool(
 
     # 5. Cap result size — spill oversize to disk (§4). The batch-wide budget is
     #    the engine's job, once every result in the turn is known.
-    return await cap_result(tool, name, result, ctx)
+    result = await cap_result(tool, name, result, ctx)
+
+    # 6. An approval the operator just gave says what it covers. After capping,
+    #    so the scope note cannot be the part that gets truncated away.
+    if freshly_approved:
+        result = replace(result, content=f"{result.content}\n\n{APPROVAL_SCOPE}")
+    return result
 
 
 async def _ask(tool: Tool, name: str, args: Any, decision: "Decision",

@@ -31,9 +31,9 @@ GLYPHS = {
     # for it, and tofu in the layout is worse than a plainer character that
     # draws. Box-drawing and geometric shapes are in essentially every
     # monospace font; the dingbats and technical symbols are not.
-    "▲": "#", "●": "*", "└": "\\_", "─": "-", "│": "|",
+    "▲": "#", "●": "*", "└": "\\_", "─": "-", "│": "|", "├": "|",
     "╭": ".", "╮": ".", "╰": "'", "╯": "'",
-    "✗": "x", "◆": "~", "⚠": "!!", "⏹": "[]", "→": "->",
+    "✗": "x", "◆": "~", "⚠": "!!", "⏹": "[]", "→": "->", "✻": "*",
     "█": "#", "░": ".", "⏎": "\n", "…": "...", "·": ".", "›": ">", "═": "=",
     "◐": "|", "◓": "/", "◑": "-", "◒": "\\",
     "—": "-", "↑": "^", "↓": "v", "⇄": "/", "⏶": "^",

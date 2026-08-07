@@ -8,8 +8,20 @@ session can't grow it without bound.
 """
 from __future__ import annotations
 
+import hashlib
 from collections import OrderedDict
 from dataclasses import dataclass
+
+
+def digest(content: str) -> str:
+    """The freshness token. Content hash rather than mtime — cross-platform and
+    robust, where mtime is unreliable on Windows and cloud-synced trees.
+
+    It lives here rather than in the file tools because this module defines what
+    a freshness token *is*; anything that wants to compare one has to spell it
+    the same way, and two spellings would be a bug that only shows up as an edit
+    sailing through a stale check."""
+    return hashlib.sha256(content.encode("utf-8", "replace")).hexdigest()
 
 
 @dataclass
@@ -21,6 +33,15 @@ class FileState:
     window of it. Freshness only cares that the file was read; the
     unchanged-re-read shortcut additionally needs to know the model still *has*
     the content, which is false after a ranged read."""
+
+    reported_change: str | None = None
+    """The digest of the last *external* change already announced to the model.
+
+    Separate from `mtime`, and that separation is the whole point. `mtime` stays
+    at the value the model actually saw, so read-before-write keeps refusing the
+    edit; this only stops the same change being announced on every subsequent
+    turn. Folding the two would silence the announcement AND the refusal, which
+    is the exact combination that lets a blind edit through."""
 
 
 class FileStateCache:
@@ -51,6 +72,36 @@ class FileStateCache:
         if st is not None:
             self._cache.move_to_end(key)
         return st
+
+    def tracked(self, limit: int | None = None) -> list[str]:
+        """Paths worth re-checking, most recently used first.
+
+        Bounded on purpose: whoever sweeps this has to touch the filesystem once
+        per entry, and a file the model read forty turns ago is not what it is
+        about to edit."""
+        paths = list(reversed(self._cache))
+        return paths[:limit] if limit is not None else paths
+
+    def note_external_change(self, path: str, current: str) -> bool:
+        """True the first time `path` is seen to differ from what the model read.
+
+        Called by a sweep, never by a tool — a tool that writes records its own
+        new state and so can never report itself as having changed underneath.
+        Returns True once per distinct change: a file a formatter rewrote is
+        worth one sentence, and worth another only if something rewrites it
+        again.
+
+        Looks the entry up WITHOUT promoting it. `get` is a use and reorders the
+        LRU; a sweep is not a use, it is the harness checking up on everything
+        at once. Promoting here would rewrite the recency order into sweep
+        order on every command — and since the sweep walks newest-first, that
+        order is inverted, so the least relevant files would end up at the front
+        and the twenty this looks at next time would be the wrong twenty."""
+        st = self._cache.get(self._norm(path))
+        if st is None or current == st.mtime or current == st.reported_change:
+            return False
+        st.reported_change = current
+        return True
 
     def freshness_error(self, path: str, current_mtime: str | None) -> str | None:
         """Return an explanatory error if `path` may not be edited yet, else None.

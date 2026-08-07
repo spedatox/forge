@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any, AsyncIterator
 
-from forge.model.base import ModelEvent, TextDelta, ToolUseRequest, UsageReport
+from forge.model.base import ModelEvent, TextDelta, ToolUseRequest, TurnEnd, UsageReport
 
 # Longer TTL on the parts that outlive a turn, shorter on the part that grows
 # every turn. Anthropic requires longer-lived breakpoints to render BEFORE
@@ -123,10 +123,20 @@ class AnthropicModel:
                 if getattr(block, "type", "") == "tool_use":
                     yield ToolUseRequest(id=block.id, name=block.name, input=dict(block.input))
             usage = getattr(final, "usage", None)
+            out_tokens = 0
             if usage is not None:
+                out_tokens = getattr(usage, "output_tokens", 0) or 0
                 yield UsageReport(
                     input_tokens=getattr(usage, "input_tokens", 0) or 0,
-                    output_tokens=getattr(usage, "output_tokens", 0) or 0,
+                    output_tokens=out_tokens,
                     cache_read=getattr(usage, "cache_read_input_tokens", 0) or 0,
                     cache_write=getattr(usage, "cache_creation_input_tokens", 0) or 0,
                 )
+            # Anthropic always reports stop_reason on the final message, so the
+            # estimate is belt-and-braces here rather than the primary signal —
+            # it earns its place on providers that report neither, and costs
+            # nothing to compute where both are available.
+            yield TurnEnd(
+                reason=getattr(final, "stop_reason", None),
+                truncated_estimate=out_tokens >= self.max_tokens > 0,
+            )

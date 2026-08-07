@@ -6,17 +6,12 @@ back to a content compare; the Forge uses the content compare as the primary
 signal)."""
 from __future__ import annotations
 
-import hashlib
-
 from pydantic import BaseModel, Field
 
-from forge.warden.results import EXEMPT
 from forge.warden.diff import render_edit
+from forge.warden.filestate import digest as _hash
+from forge.warden.results import EXEMPT
 from forge.warden.tool import Tool, ToolContext, ToolResult
-
-
-def _hash(content: str) -> str:
-    return hashlib.sha256(content.encode("utf-8", "replace")).hexdigest()
 
 
 # ── read_file ────────────────────────────────────────────────────────────────

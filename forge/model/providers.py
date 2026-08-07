@@ -24,7 +24,7 @@ import logging
 import uuid
 from typing import Any, AsyncIterator
 
-from forge.model.base import ModelEvent, TextDelta, ToolUseRequest, UsageReport
+from forge.model.base import ModelEvent, TextDelta, ToolUseRequest, TurnEnd, UsageReport
 
 
 def _usage_report(usage: Any) -> UsageReport | None:
@@ -67,11 +67,24 @@ _OPENAI_COMPAT = {
 }
 _PROVIDERS = {"anthropic", *_OPENAI_COMPAT}
 
-# chat-completions finish_reason → the reason our loop cares about. We only need
-# to know whether tools were requested; the loop's real stop signal is whether any
-# ToolUseRequest was yielded, so this is informational.
+# chat-completions finish_reason → the vocabulary TurnEnd speaks, which is
+# Anthropic's. The loop's stop signal is still whether any ToolUseRequest was
+# yielded; what this adds is the one case that signal cannot see — "length",
+# meaning the turn was cut off at the cap and its text is half of something.
 _FINISH_TO_STOP = {"stop": "end_turn", "tool_calls": "tool_use",
                    "function_call": "tool_use", "length": "max_tokens"}
+
+
+def _turn_end(finish: str | None, report: UsageReport | None, cap: int) -> TurnEnd:
+    """What the provider said about why it stopped, plus the fallback inference.
+
+    Providers in this family are inconsistent about both halves: some send no
+    usage unless asked via `stream_options`, some send a finish_reason of None
+    on the last chunk. Reading whichever arrived beats requiring either."""
+    return TurnEnd(
+        reason=_FINISH_TO_STOP.get(finish or "", finish or None),
+        truncated_estimate=bool(report and cap > 0 and report.output_tokens >= cap),
+    )
 
 
 # OpenAI reasoning models whose function tools must go to /v1/responses rather
@@ -158,6 +171,7 @@ class OpenAICompatModel:
         raw = await self._client.chat.completions.create(**params, stream=True)
         acc: dict[int, dict[str, str]] = {}
         usage: Any = None
+        finish: str | None = None
         try:
             async for chunk in raw:
                 if signal.is_set():
@@ -165,6 +179,7 @@ class OpenAICompatModel:
                 usage = getattr(chunk, "usage", None) or usage
                 if not chunk.choices:
                     continue
+                finish = getattr(chunk.choices[0], "finish_reason", None) or finish
                 delta = chunk.choices[0].delta
                 if delta is None:
                     continue
@@ -191,6 +206,7 @@ class OpenAICompatModel:
         report = _usage_report(usage)
         if report is not None:
             yield report
+        yield _turn_end(finish, report, self.max_tokens)
 
     async def _stream_responses(self, system: str, messages: list[dict[str, Any]],
                                 tools: list[dict[str, Any]], signal: asyncio.Event
@@ -207,13 +223,21 @@ class OpenAICompatModel:
         # output_index → accumulating call.
         calls: dict[int, dict[str, str]] = {}
         usage: Any = None
+        finish: str | None = None
         try:
             async for event in raw:
                 if signal.is_set():
                     break
                 etype = getattr(event, "type", "")
-                if etype == "response.completed":
-                    usage = getattr(getattr(event, "response", None), "usage", None) or usage
+                if etype in ("response.completed", "response.incomplete"):
+                    response = getattr(event, "response", None)
+                    usage = getattr(response, "usage", None) or usage
+                    # The Responses API does not use finish_reason. A turn cut
+                    # off at the cap arrives as response.incomplete carrying
+                    # incomplete_details.reason == "max_output_tokens".
+                    details = getattr(response, "incomplete_details", None)
+                    if getattr(details, "reason", None) == "max_output_tokens":
+                        finish = "length"
                 if etype == "response.output_text.delta":
                     delta = getattr(event, "delta", "") or ""
                     if delta:
@@ -245,6 +269,7 @@ class OpenAICompatModel:
         report = _usage_report(usage)
         if report is not None:
             yield report
+        yield _turn_end(finish, report, self.max_tokens)
 
 
 # ── Anthropic content-block → chat-completions translation ───────────────────
