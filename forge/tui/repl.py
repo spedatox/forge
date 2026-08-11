@@ -53,7 +53,8 @@ from forge.warden.state import StopReason
 from forge.warden.subagents import SubagentRunner
 from forge.warden.tool import ToolContext
 from forge.warden.toolsource import (close_providers, fold_providers,
-                                     resolve_optional, without_graph_tools)
+                                     resolve_optional, without_graph_tools,
+                                     without_memory_tools)
 
 
 async def run_repl(agent: str = "optimus", workspace: Path | None = None,
@@ -380,11 +381,17 @@ async def _run_turn(prompt: str, session: Session, settings: ForgeSettings,
         to a model their own descriptions told to try them first. `graph_index`
         is always present and can build one mid-session — this re-check is what
         lets the query tools appear afterwards instead of staying withheld for
-        a graph the agent has just created."""
+        a graph the agent has just created.
+
+        The owner's memory goes for the same reason and permanently: it lives
+        in Mark VI, this path never has Mark VI on the other end, and unlike a
+        graph nothing here can bring one into existence mid-session. The
+        offline snapshot in the system prompt already says so in words."""
+        available = without_memory_tools(session.tools)
         live = ctx.graph
         if live is not None and getattr(live, "available", False):
-            return dict(session.tools)
-        return without_graph_tools(session.tools)
+            return available
+        return without_graph_tools(available)
 
     warden = Warden(
         system_prompt=_system_prompt(session, extensions),

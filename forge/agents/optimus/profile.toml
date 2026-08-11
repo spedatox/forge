@@ -34,7 +34,15 @@ model = "deepseek:deepseek-v4-pro"
 # or a changed API signature has to be guessed at. These are harness-side
 # instruments and do not touch the Cell's network posture below — see
 # forge/tools/web.py.
-tools = ["coding", "web"]
+#
+# "memory" is the owner's memory, which lives in Mark VI. It is a separate group
+# on purpose — it is the owner's, not the repository's, and it is shared with
+# every other agent that serves him. Without it the memory block that arrives on
+# every turn is instructing this agent to use a tool it does not have: it cannot
+# open a project file, look up a person, or write down anything it learns. The
+# group is withheld automatically when there is no Mark VI on the other end, so
+# the standalone TUI is unaffected.
+tools = ["coding", "web", "memory"]
 
 # One working mode with the safety gate always on; "plan" would make it
 # read-only for review (§6).

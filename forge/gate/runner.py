@@ -33,6 +33,7 @@ from forge.warden.toolsource import (
     fold_providers,
     resolve_optional,
     without_graph_tools,
+    without_memory_tools,
 )
 from forge.warden.filestate import FileStateCache
 from forge.warden.todos import TodoList
@@ -62,6 +63,7 @@ async def run_job(
     hooks: list | None = None,
     fragments: list[PromptFragment] | None = None,
     event_sinks: list | None = None,
+    memory: Any | None = None,
 ) -> Terminal:
     """Run one job to a single Terminal, streaming JobEvents via `emit`.
 
@@ -151,11 +153,18 @@ async def run_job(
             ),
             network_allowed=allow_network,
             oracle=oracle,                    # Seam 2
+            memory=memory,                    # the owner's memory, in Mark VI
             hooks=list(hooks or []),          # Seam 3
         )
 
         async def _tools() -> dict:
             built = resolve_optional(await fold_providers(providers, cfg, request))
+            # The owner's memory needs a live channel to Mark VI, and a job that
+            # has none must not be offered the tool: the memory block in its
+            # prompt already tells it to use one, and a tool that can only fail
+            # turns that into a wasted call and a wrong conclusion.
+            if ctx.memory is None:
+                built = without_memory_tools(built)
             live = ctx.graph
             if live is not None and getattr(live, "available", False):
                 return built
