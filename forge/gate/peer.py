@@ -29,6 +29,7 @@ from forge.config import ForgeSettings
 from forge.gate.protocol import (JobEvent, job_event_to_chat_event,
                                  job_from_chat_request, job_from_task_dispatch)
 from forge.extensions import load_extensions
+from forge.warden.memory import MemoryReply, RemoteMemory
 from forge.warden.oracle import Answer, ChannelOracle
 from forge.warden.permissions import AllowList
 from forge.gate.runner import run_job
@@ -69,6 +70,11 @@ class ForgePeer:
         # One oracle for the peer — the socket is the channel, so parked asks
         # from any job resolve through the same frame handler.
         self._oracle = ChannelOracle(self._send, timeout_s=settings.ask_timeout_s)
+        # The owner's memory, over the same socket. One channel for the peer for
+        # the same reason as the oracle: replies from any job correlate through
+        # one frame handler, and a second connection to the same backend would
+        # be another thing to authenticate and another thing to reconnect.
+        self._memory = RemoteMemory(self._send)
         self._ws: Any = None
         self._send_lock = asyncio.Lock()
         self._chats: dict[str, asyncio.Event] = {}     # chat_id/task_id → abort signal
@@ -142,6 +148,12 @@ class ForgePeer:
                 # not a reason to proceed: every question still waiting for an
                 # answer resolves to denied.
                 self._oracle.abandon_all("the operator channel closed")
+                # And every memory call. A write parked on a socket that has
+                # gone must come back as a failure, not hang and not quietly
+                # succeed — an agent that believes it filed something and did
+                # not has lost the fact and the knowledge that it lost it.
+                self._memory.abandon_all("the connection to Mark VI closed "
+                                         "before this could be saved")
                 for ev in self._chats.values():
                     ev.set()
 
@@ -221,6 +233,16 @@ class ForgePeer:
             ask_id = str(frame.get("ask_id", ""))
             if not self._oracle.answer(ask_id, str(frame.get("text", ""))):
                 logger.info("question_response_unmatched", extra={"ask_id": ask_id})
+        elif ftype == "memory_response":
+            # Mark VI's answer to one memory command. `ok` is carried explicitly
+            # rather than inferred from the presence of text: a `delete` that
+            # succeeds says very little, and guessing from an empty body would
+            # report the one operation with no output as a failure.
+            request_id = str(frame.get("request_id", ""))
+            reply = MemoryReply(ok=bool(frame.get("ok", True)),
+                                text=str(frame.get("result", "")))
+            if not self._memory.resolve(request_id, reply):
+                logger.info("memory_response_unmatched", extra={"request_id": request_id})
         elif ftype == "shutdown":
             logger.info("peer_shutdown_requested")
             self._shutdown = True
@@ -289,7 +311,8 @@ class ForgePeer:
                                  tool_providers=self.extensions.tool_providers(),
                                  fragments=self.extensions.fragments,
                                  hooks=self.extensions.hooks,
-                                 oracle=self._oracle, allowlist=self.allowlist)
+                                 oracle=self._oracle, allowlist=self.allowlist,
+                                 memory=self._memory)
             status = "ok" if term.reason is StopReason.COMPLETED else "error"
             result = term.final_text or (term.error or "(no output)")
             await self._send({
@@ -340,7 +363,12 @@ class ForgePeer:
                                  tool_providers=self.extensions.tool_providers(),
                                  fragments=self.extensions.fragments,
                                  hooks=self.extensions.hooks,
-                                 oracle=self._oracle, allowlist=self.allowlist)
+                                 oracle=self._oracle, allowlist=self.allowlist,
+                                 # Labelled with the chat so Mark VI knows whose
+                                 # turn is writing; the peer runs several
+                                 # conversations over one socket and the frame is
+                                 # the only place that can carry the association.
+                                 memory=self._memory.scoped(chat_id))
             if not terminal_seen:
                 # Ensure Mark VI always gets a terminal frame (abort path, etc.).
                 final_type = "done" if term.reason is StopReason.COMPLETED else "error"

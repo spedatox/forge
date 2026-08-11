@@ -12,15 +12,33 @@ import tomllib
 from pathlib import Path
 
 from forge.agents.config import AgentConfig, CellSpec, GitIdentity
-from forge.tools import ALL_TOOLS, CODING_TOOLS, SECURITY_TOOLS, WEB_TOOLS
+from forge.tools import (ALL_TOOLS, CODING_TOOLS, HISAR_TOOLS, MEMORY_TOOLS,
+                         NOTIFY_TOOLS, SECURITY_TOOLS, WEB_TOOLS)
 
 AGENTS_DIR = Path(__file__).parent
 
 # Named tool groups a profile may reference instead of listing every tool.
+#
+# This dict is the ONLY thing that makes a group nameable. A group defined in
+# forge/tools/__init__.py and missing from here is not a narrower default — it
+# is unreachable, because a profile has no word for it. `hisar` and `notify`
+# spent their whole existence in that state: defined, tested, filtered when
+# unconfigured, and never in any agent's toolset even when they were.
+#
+# Nothing failed loudly. `_resolve_tools` rejects a name it does not know, but
+# there was no check the other way round, so the missing half of the wiring
+# looked exactly like a deliberately narrow default. `tests/test_tool_groups.py`
+# is the check the other way round.
 _TOOL_GROUPS = {
     "coding": tuple(cls.name for cls in CODING_TOOLS),
     "security": tuple(cls.name for cls in SECURITY_TOOLS),
     "web": tuple(cls.name for cls in WEB_TOOLS),
+    "memory": tuple(cls.name for cls in MEMORY_TOOLS),
+    # The owner's filesystem and a line to their phone. Separate groups, and
+    # separate from each other, because that is the entire reason they were not
+    # folded into `coding`: a profile takes one, both or neither on purpose.
+    "hisar": tuple(cls.name for cls in HISAR_TOOLS),
+    "notify": tuple(cls.name for cls in NOTIFY_TOOLS),
 }
 
 
@@ -83,6 +101,7 @@ def _load_one(profile_path: Path, prompt_path: Path) -> AgentConfig:
         system_prompt=prompt_path.read_text(encoding="utf-8"),
         permission_mode=data.get("permission_mode", "act"),
         max_iterations=int(data.get("max_iterations", 30)),
+        vision_model=str(data.get("vision_model", "") or ""),
         cell=CellSpec(
             allow_network=bool(cell.get("allow_network", False)),
             cpus=float(cell.get("cpus", 1.0)),

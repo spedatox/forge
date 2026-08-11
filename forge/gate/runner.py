@@ -25,6 +25,7 @@ from forge.gate.events import EventFan
 from forge.gate.protocol import JobEvent, JobRequest
 from forge.graph.sidecar import GraphSidecar
 from forge.model.base import Model
+from forge.warden import images
 from forge.warden.engine import Warden
 from forge.warden.toolsource import (
     BuiltinToolProvider,
@@ -33,6 +34,7 @@ from forge.warden.toolsource import (
     fold_providers,
     resolve_optional,
     without_graph_tools,
+    without_memory_tools,
 )
 from forge.warden.filestate import FileStateCache
 from forge.warden.todos import TodoList
@@ -62,6 +64,7 @@ async def run_job(
     hooks: list | None = None,
     fragments: list[PromptFragment] | None = None,
     event_sinks: list | None = None,
+    memory: Any | None = None,
 ) -> Terminal:
     """Run one job to a single Terminal, streaming JobEvents via `emit`.
 
@@ -120,6 +123,15 @@ async def run_job(
         # job; None means "use the profile's model_ref" (Rule 10: model IDs
         # live only in profiles, and the override is a profile-level concept).
         model_ref = request.model_override or cfg.model_ref
+        # A turn carrying a photo goes to the profile's vision model instead —
+        # Optimus is pinned to a text-only model and the picture would otherwise
+        # reach a provider that cannot read it. An explicit override still wins
+        # (README precedence: the job's model is highest), so a deliberate pick
+        # of a blind model fails out loud rather than being quietly overruled.
+        if (not request.model_override and cfg.vision_model
+                and images.has_image(request.history)):
+            model_ref = cfg.vision_model
+            await out("chunk", f"[image in this turn — using {model_ref}]\n")
         # One number: what a turn may produce is also what the ledger holds back
         # for the compaction call. If these drifted apart, compaction would
         # trigger with either too little room to finish or more than it needs.
@@ -151,11 +163,18 @@ async def run_job(
             ),
             network_allowed=allow_network,
             oracle=oracle,                    # Seam 2
+            memory=memory,                    # the owner's memory, in Mark VI
             hooks=list(hooks or []),          # Seam 3
         )
 
         async def _tools() -> dict:
             built = resolve_optional(await fold_providers(providers, cfg, request))
+            # The owner's memory needs a live channel to Mark VI, and a job that
+            # has none must not be offered the tool: the memory block in its
+            # prompt already tells it to use one, and a tool that can only fail
+            # turns that into a wasted call and a wrong conclusion.
+            if ctx.memory is None:
+                built = without_memory_tools(built)
             live = ctx.graph
             if live is not None and getattr(live, "available", False):
                 return built

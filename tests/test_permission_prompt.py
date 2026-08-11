@@ -191,3 +191,94 @@ def test_arrow_keys_are_read_without_the_line_editor():
     # names prompt_toolkit precisely to explain why it is NOT used, and a grep
     # would fail on the explanation.
     assert not any("prompt_toolkit" in m for m in imported)
+
+
+# ── A prompt nobody answers must not hold the whole harness ──────────────────
+#
+# Reported as "Forge sometimes gets stuck running a command", and `run_command`
+# is exactly the tool the gate stops. The keystroke reader blocks in a worker
+# thread; the turn is parked inside that one tool dispatch; and `_run_turn`
+# answers ctrl+c by setting the interrupt event and then awaiting the loop —
+# which can no longer reach a boundary where the event would be checked. The
+# operator pressed ctrl+c and nothing happened, for as long as they let it.
+
+
+def test_ctrl_c_reaches_a_prompt_that_is_waiting(monkeypatch):
+    """The hang. The prompt is the only thing that can notice, because it is
+    what the turn is parked on."""
+    from forge.tui import keys
+    from forge.tui.session import TerminalOracle
+
+    signal = asyncio.Event()
+    monkeypatch.setattr(keys, "available", lambda: True)
+
+    def _never_pressed(timeout=None):
+        # Whatever deadline the caller set, expired. Nobody is at the keyboard.
+        assert timeout is not None, "an unbounded read is the bug itself"
+        signal.set()                       # ctrl+c, mid-wait
+        return keys.NOTHING
+
+    monkeypatch.setattr(keys, "read_key", _never_pressed)
+
+    oracle = TerminalOracle(signal=signal)
+    answer = asyncio.wait_for(
+        oracle.ask("run_command", "rm -rf build", "destructive"), timeout=5)
+    answer = asyncio.run(answer)
+
+    assert answer.approved is False
+    assert "interrupted" in answer.note
+
+
+def test_an_interrupted_run_is_not_the_operator_saying_no(monkeypatch):
+    """Both end with the action not happening and they read differently: "the
+    operator declined this" invites the model to find another way, and a
+    stopped run does not."""
+    from forge.tui.session import TerminalOracle
+
+    signal = asyncio.Event()
+    signal.set()
+    answer = asyncio.run(TerminalOracle(signal=signal).ask("run_command", "x", "y"))
+
+    assert answer.approved is False
+    assert "declined" not in answer.note
+    assert "interrupted" in answer.note
+
+
+def test_an_interrupted_run_does_not_stop_to_ask_a_question():
+    """`ask_operator` parks the same way, and an unanswered question already
+    means "decide for yourself" — so an interrupted one costs nothing."""
+    from forge.tui.session import TerminalOracle
+
+    signal = asyncio.Event()
+    signal.set()
+    reply = asyncio.run(TerminalOracle(signal=signal).consult("REST or WebSocket?"))
+
+    assert reply.answered is False
+
+
+def test_a_prompt_with_no_interrupt_attached_still_blocks_normally(monkeypatch):
+    """The peer path and every test construct an oracle without a signal. That
+    has to keep meaning "wait for the answer", not "give up immediately"."""
+    _answer(monkeypatch, "y")
+    assert asyncio.run(TerminalOracle().ask("t", "k", "r")).approved
+
+
+def test_the_turn_hands_its_interrupt_to_the_oracle():
+    """The wiring, without which everything above is unreachable in the app."""
+    import inspect
+
+    from forge.tui import repl
+
+    src = inspect.getsource(repl._run_turn)
+    assert "session.oracle.signal = signal" in src
+
+
+def test_a_bounded_read_reports_expiry_distinctly():
+    """NOTHING and None must not collapse into one another: None means this
+    terminal will never deliver a key and the caller should fall back to a
+    typed line, NOTHING means keep waiting. A caller that cannot tell them
+    apart either abandons a working prompt or blocks on a dead one."""
+    from forge.tui import keys
+
+    assert keys.NOTHING is not None
+    assert keys.NOTHING not in (keys.UP, keys.DOWN, keys.ENTER, keys.CANCEL)

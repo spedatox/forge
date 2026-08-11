@@ -317,7 +317,7 @@ def test_typing_a_letter_narrows_to_matches(tmp_path):
     completer = ForgeCompleter(command_help(), tmp_path)
     offered = [c.text for c in completer.get_completions(Document("/re"), None)]
 
-    assert set(offered) == {"resume", "review"}
+    assert set(offered) == {"resume", "restore", "review"}
 
 
 @pytest.mark.skipif(not AVAILABLE, reason="prompt_toolkit not installed")

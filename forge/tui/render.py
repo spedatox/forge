@@ -14,6 +14,7 @@ transcript that blurs those reads like the model ran the commands itself.
 from __future__ import annotations
 
 import json
+import textwrap
 from typing import Any
 
 from forge.tui import ansi, ui
@@ -37,6 +38,7 @@ class StreamRenderer:
         self._wrote_text = False        # has model prose landed this turn?
         self._prose: list[str] = []     # streamed, and kept for repainting
         self._streamed_rows = 0         # screen rows the raw text occupies
+        self._wrapped_len = 0           # chars of wrapped prose already written
         self._last_was_harness = False  # was the last thing written a tool line?
         self._in_flight: set[str] = set()
         self._batch = 0                 # calls in the current parallel batch
@@ -76,8 +78,14 @@ class StreamRenderer:
         elif self._last_was_harness:
             ansi.write()
         self._last_was_harness = False
-        ansi.write(text, end="")
-        self._streamed_rows = ansi.wrapped_height("".join(self._prose))
+        # Wrap at PROSE_WIDTH so the streaming text is readable on wide
+        # terminals, the same constraint the final rendered markdown uses.
+        wrapped = textwrap.fill("".join(self._prose), width=ui.PROSE_WIDTH)
+        new_part = wrapped[self._wrapped_len :]
+        if new_part:
+            ansi.write(new_part, end="")
+            self._wrapped_len = len(wrapped)
+        self._streamed_rows = ansi.wrapped_height(wrapped)
 
     def _flush_prose(self) -> None:
         """Replace the streamed text with its rendered form.
@@ -96,6 +104,7 @@ class StreamRenderer:
             return
         body = "".join(self._prose)
         self._prose.clear()
+        self._wrapped_len = 0
         streamed_rows = self._streamed_rows
         self._streamed_rows = 0
 

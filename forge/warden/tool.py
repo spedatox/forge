@@ -69,6 +69,12 @@ class ToolContext:
     oracle: "Any | None" = None
     """Seam 2: who answers a gated action. None means nobody is reachable, which
     resolves to deny — the failure direction is fixed."""
+    memory: "Any | None" = None
+    """The owner's memory, which lives in Mark VI and is reached over the peer
+    socket. None means there is no backend on this run — the standalone TUI —
+    and the `memory` tool is withheld rather than offered and failing. Injected
+    for the same reason `oracle` is: only the embedder holds the connection, and
+    the tool boundary stays name/description/schema."""
     hooks: list = field(default_factory=list)
     """Seam 3 extension points, consulted inside the dispatch gauntlet. Empty
     unless something registered one at assembly."""

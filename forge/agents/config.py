@@ -61,5 +61,15 @@ class AgentConfig:
     system_prompt: str
     permission_mode: str = "act"    # "act" | "plan" (§6)
     max_iterations: int = 200       # runaway guard, not a work limit (§3)
+    # Where a turn carrying a photo goes instead. Empty → nowhere: the turn runs
+    # on `model_ref` and, if that model has no vision, the provider says so.
+    #
+    # This is a second model ref rather than a `supports_vision` flag because a
+    # flag would need a table of which model IDs can see, in code, going stale
+    # silently — the same objection `tui/status.py` makes to a built-in price
+    # table, and Rule 10's reason for keeping model IDs in profiles at all. An
+    # operator naming the model they want is a fact; a table is a guess with a
+    # shelf life.
+    vision_model: str = ""
     cell: CellSpec = CellSpec()
     git: GitIdentity = GitIdentity()

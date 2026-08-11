@@ -33,6 +33,7 @@ import logging
 from typing import Any
 
 from forge.model.base import Model, TextDelta
+from forge.warden import images
 
 logger = logging.getLogger("forge.warden")
 
@@ -234,6 +235,13 @@ def render_for_summary(messages: list[dict[str, Any]]) -> str:
             kind = block.get("type")
             if kind == "text" and block.get("text"):
                 lines.append(f"{role.upper()}: {block['text']}")
+            elif kind == "image":
+                # The summarizer call is text-only, so the picture cannot go —
+                # but its ABSENCE must be visible. Dropped silently, a summary
+                # reads as though the operator asked about nothing, and the
+                # rebuilt transcript loses the fact that there was ever an
+                # image to refer back to.
+                lines.append(f"{role.upper()}: {images.describe(block)}")
             elif kind == "tool_use":
                 try:
                     args = json.dumps(block.get("input", {}), default=str)[:2_000]

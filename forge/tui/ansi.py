@@ -115,6 +115,12 @@ def _probe_unicode() -> bool:
 
 _ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 
+_ESCAPE_UP = re.compile(r"\x1b\[(\d*)A")
+"""Cursor-up moves, so a caller measuring what a frame did to the screen can
+account for the rows it reclaimed as well as the rows it wrote. Both travel in
+one payload now, and a tally that counts only the newlines sees a leak that
+is not there."""
+
 
 def visible_width(text: str) -> int:
     """How wide a styled string actually prints.
@@ -123,6 +129,18 @@ def visible_width(text: str) -> int:
     a painted string puts its column somewhere different on every row. Anything
     aligning two columns has to measure with this instead."""
     return len(_ESCAPE.sub("", text))
+
+
+def styled() -> bool:
+    """Whether this terminal takes escape sequences at all.
+
+    Public because the transient primitives below silently no-op without it,
+    and anything that draws a region has to make the SAME decision about
+    whether to write in the first place. A caller that writes unconditionally
+    and reclaims conditionally does not degrade — it floods: every frame is
+    committed and none is ever taken back. That is precisely what happened when
+    the live region drew with `write` and cleared with `rewind`."""
+    return _ENABLED
 
 
 def unicode_ok() -> bool:
@@ -208,6 +226,41 @@ def rewind(lines: int) -> bool:
         return False
     write(f"\r\x1b[{lines}A\x1b[J", end="")
     return True
+
+
+def repaint(lines: list[str], previous_rows: int) -> int:
+    """Draw a multi-row region over the one already there, in ONE write.
+
+    Returns the number of SCREEN rows the new frame occupies, which is what the
+    next call must be given back — and is not `len(lines)`. A row wider than the
+    terminal wraps, so counting list entries under-counts the region and the
+    following rewind lands mid-frame; the leftovers scroll away as the next
+    frame is drawn under them. `wrapped_height` measures what the terminal will
+    actually do with each line, escape codes excluded.
+
+    **One write, and no blanking step.** The obvious implementation — rewind,
+    erase the region, write the new rows — is what makes a live region blink:
+    between the erase and the redraw the region is genuinely empty on screen,
+    and at eight frames a second the eye sees every one of those gaps. Instead
+    the cursor moves up WITHOUT erasing, each row erases only its own tail as it
+    is overwritten (`\\x1b[K`), and a single `\\x1b[J` at the end reclaims
+    whatever a taller previous frame left below. The region is never blank, and
+    the whole frame reaches the terminal in one flush rather than one per row.
+
+    A no-op without styling, exactly like `transient`. There is no way to
+    reclaim a row on a terminal that cannot move its cursor, so the honest
+    behaviour is to draw nothing at all rather than commit a frame per tick.
+    """
+    if not _ENABLED:
+        return 0
+    parts = ["\r"]
+    if previous_rows > 0:
+        parts.append(f"\x1b[{previous_rows}A")
+    for line in lines:
+        parts.append(f"\x1b[K{line}\n")
+    parts.append("\x1b[J")          # reclaim what a taller frame left below
+    write("".join(parts), end="")
+    return sum(wrapped_height(line) for line in lines)
 
 
 def wrapped_height(text: str, width: int = 0) -> int:

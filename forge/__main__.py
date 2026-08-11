@@ -43,7 +43,7 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p_chat = sub.add_parser("chat", help="interactive session in the current directory")
-    p_chat.add_argument("--agent", default=os.environ.get("FORGE_AGENT", "optimus"))
+    p_chat.add_argument("--agent", default=os.environ.get("FORGE_AGENT", "centurion"))
     p_chat.add_argument("--cwd", default=None,
                         help="workspace to work in (default: the current directory)")
     p_chat.add_argument("--model", default=None, help="override the profile's model ref")
@@ -57,7 +57,7 @@ def main(argv: list[str] | None = None) -> int:
     p_serve.add_argument("--port", type=int, default=8770)
 
     p_conn = sub.add_parser("connect", help="connect to Mark VI as a peer")
-    p_conn.add_argument("--agent", default=os.environ.get("FORGE_AGENT", "optimus"))
+    p_conn.add_argument("--agent", default=os.environ.get("FORGE_AGENT", "centurion"))
 
     sub.add_parser("agents", help="list configured agents")
 
