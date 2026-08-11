@@ -66,9 +66,11 @@ class ClaudeCodeArgs(BaseModel):
         ))
     max_turns: int = Field(
         default=DEFAULT_MAX_TURNS,
+        ge=1,
+        le=200,
         description=(
             "Maximum number of tool-calling turns Claude Code may take "
-            f"before it is stopped. Default {DEFAULT_MAX_TURNS}. Raise it "
+            f"before it is stopped. Default {DEFAULT_MAX_TURNS} (max 200). Raise it "
             "for genuinely large jobs; lower it for quick checks where a "
             "runaway loop would waste time."
         ))
