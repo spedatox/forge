@@ -240,7 +240,9 @@ def welcome_footer(tips: tuple[tuple[str, str], ...],
 
 def prompt_width() -> int:
     c = console()
-    return min(c.width - 1, 100) if c is not None else 80
+    # Full terminal width, minus one column for safety at the right edge.
+    # The old 100-char cap made the input frame look broken on wide terminals.
+    return max(20, c.width - 1) if c is not None else 80
 
 
 def prompt_top() -> str:
@@ -381,7 +383,7 @@ def live_row(label: str, target: str, elapsed: float, *, last: bool = False,
     c = console()
     if c is None:
         return ""
-    width = max(30, min(c.width, 100))
+    width = max(30, c.width)
     stamp = f"{elapsed:.0f}s"
 
     grid = Table.grid(padding=(0, 0))

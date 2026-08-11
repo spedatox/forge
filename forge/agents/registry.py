@@ -101,6 +101,7 @@ def _load_one(profile_path: Path, prompt_path: Path) -> AgentConfig:
         system_prompt=prompt_path.read_text(encoding="utf-8"),
         permission_mode=data.get("permission_mode", "act"),
         max_iterations=int(data.get("max_iterations", 30)),
+        vision_model=str(data.get("vision_model", "") or ""),
         cell=CellSpec(
             allow_network=bool(cell.get("allow_network", False)),
             cpus=float(cell.get("cpus", 1.0)),

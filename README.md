@@ -139,6 +139,27 @@ The first character of a line determines how it is handled:
 | `!command` | Runs in the sandbox immediately — no model call, no token cost. Not added to the conversation. |
 | `/command` | Handled by the interface |
 
+### Attaching an image
+
+Name a picture anywhere in a line and it is sent with the turn:
+
+```
+what is wrong with this layout? @screenshot.png
+```
+
+`@` is optional — dragging a file onto the terminal pastes its path, quoted if
+it contains a space, and that works too. A token is treated as an attachment
+only if it has an image suffix, resolves against the workspace, and exists, so
+`email @bob about the .png pipeline` attaches nothing.
+
+PNG, JPEG, GIF and WebP, up to 3.75MB each and eight per turn. The path stays in
+the text where you typed it — it is how you refer to the picture in the next
+sentence. Anything that looked like an image and could not be read is reported
+and the turn goes ahead without it.
+
+A turn carrying an image runs on the agent's `vision_model` if its default
+cannot see; the swap is printed when it happens.
+
 ### Keys
 
 | Key | Action |
@@ -437,8 +458,19 @@ A bare reference is treated as Anthropic. Non-Anthropic providers require the
 Selection order, highest priority first:
 
 1. `--model` on the command line, or the model named in a job request
-2. `FORGE_LLM_FALLBACK_CHAIN`, tried in order when a provider fails
-3. The agent's `profile.toml`
+2. The agent's `vision_model`, when the turn carries an image
+3. `FORGE_LLM_FALLBACK_CHAIN`, tried in order when a provider fails
+4. The agent's `profile.toml`
+
+An explicit model outranks `vision_model` deliberately: an operator who named a
+model meant it, and being silently overruled is the worse surprise. The picture
+is sent to what they picked and refused out loud if that model cannot see it.
+
+Providers differ in what they accept beyond text. An image is carried as an
+Anthropic content block internally and translated at the request boundary — to
+`image_url` for the chat-completions family, `input_image` for OpenAI's
+Responses API. A model without vision returns an error rather than answering
+about a picture it never received.
 
 Providers differ in how strictly they enforce tool schemas. Anthropic enforces
 required parameters; others may omit them or substitute different names. Tools
@@ -457,6 +489,7 @@ name = "Optimus"
 domain = "systems, code & infrastructure"
 
 model = "deepseek:deepseek-v4-pro"
+vision_model = "claude-sonnet-4-6"
 tools = ["coding", "web"]
 permission_mode = "act"
 max_iterations = 30
@@ -472,10 +505,17 @@ timeout_s = 120
 |---|---|
 | `agent_id` | Identifier used on the wire and in job requests |
 | `model` | Model reference. Model identifiers live only in profiles. |
+| `vision_model` | Where a turn carrying an image goes instead. Omit if `model` can already see. |
 | `tools` | Tool groups or individual tool names — see below |
 | `permission_mode` | `act` or `plan` |
 | `max_iterations` | Loop ceiling for a single task |
 | `[cell]` | Sandbox resource and network policy |
+
+`vision_model` is a second model reference rather than a `supports_vision` flag
+because a flag would need a table, in code, of which model identifiers can see —
+going stale silently, the same objection this project makes to a built-in price
+table. An operator naming the model they want is a fact; a table is a guess with
+a shelf life.
 
 `tools` takes any of these group names, individual tool names, or a mix:
 
@@ -515,6 +555,33 @@ that fails still sends a terminating frame, so a caller is never left waiting.
 `forge serve` exposes the same job interface as a standalone WebSocket server
 without connecting to Mark VI.
 
+### More than one peer for the same agent
+
+One agent may run in several places at once — on the server and on a
+workstation. Mark VI keys connections by `(agent_id, host)`, so those coexist
+only if each peer says which machine it is:
+
+| Variable | Purpose |
+|---|---|
+| `FORGE_HOST` | A stable name for this machine. Blank → the bare hostname. |
+| `FORGE_ROOTS` | Directories this peer will work in, `os.pathsep`-separated. Blank → anything well-formed for its platform. |
+
+`FORGE_ROOTS` is how the routing is steered: the owner picks a folder and the
+folder identifies the machine. Leave it blank on the server, which should take
+anything, and set it on a workstation so only that machine's own projects come
+to it.
+
+Advertising is not enforcement. These are routing hints; what a peer will
+actually do is bounded on the peer, by its own tools and permission gate.
+
+**Why this matters for working locally.** A workstation peer runs the code in
+your working tree while everything Mark VI provides — the owner's memory, the
+model picker, images, permission prompts in the operator's client — arrives over
+the socket exactly as it does in production. That is the loop that does not
+require a deploy to test a change. Set `FORGE_HOST` before doing it: until each
+peer named its machine, every one registered as `default` and the second to
+connect silently displaced the first.
+
 ---
 
 ## Configuration reference
@@ -532,6 +599,8 @@ without connecting to Mark VI.
 | `FORGE_NO_STATUS` | unset | Suppress the status line |
 | `SPEDA_WS_URL` | `ws://127.0.0.1:8000/agents/ws/optimus` | Mark VI endpoint |
 | `SPEDA_API_KEY` | unset | Mark VI authentication |
+| `FORGE_HOST` | hostname | Which machine this peer speaks for |
+| `FORGE_ROOTS` | unset | Directories this peer will work in, `os.pathsep`-separated |
 | `TAVILY_API_KEY` | unset | Required by `web_search` |
 | `HISAR_MACHINE_TOKEN` | unset | Required by the `hisar` tools |
 | `HISAR_URL` | `https://hisar.spedatox.systems` | Vault endpoint |
@@ -579,7 +648,7 @@ tests/
 pytest -q
 ```
 
-509 tests. No network access or API key is required; provider calls and
+966 tests. No network access or API key is required; provider calls and
 sandboxes are substituted.
 
 ---

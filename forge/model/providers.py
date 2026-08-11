@@ -343,6 +343,10 @@ def _translate_message_responses(message: dict[str, Any]) -> list[dict[str, Any]
     tool_result blocks become standalone `function_call_output` items emitted
     before the user text they arrive with, mirroring _translate_message's
     ordering so a call stays adjacent to its output.
+
+    An image is an `input_image` part here rather than chat-completions'
+    `image_url` — same picture, different word, and the reason this function
+    exists separately at all.
     """
     role = message["role"]
     content = message.get("content")
@@ -353,12 +357,17 @@ def _translate_message_responses(message: dict[str, Any]) -> list[dict[str, Any]
     outputs: list[dict[str, Any]] = []
     calls: list[dict[str, Any]] = []
     parts: list[dict[str, Any]] = []
+    images: list[dict[str, Any]] = []
 
     for block in content or []:
         btype = block.get("type")
         if btype == "text":
             parts.append({"type": "output_text" if role == "assistant" else "input_text",
                           "text": block.get("text", "")})
+        elif btype == "image":
+            url = _image_url(block) if role != "assistant" else None
+            if url:
+                images.append({"type": "input_image", "image_url": url})
         elif btype == "tool_use":
             calls.append({"type": "function_call", "call_id": block["id"],
                           "name": block["name"],
@@ -378,15 +387,63 @@ def _translate_message_responses(message: dict[str, Any]) -> list[dict[str, Any]
         out.extend(calls)
     else:
         out.extend(outputs)
-        if parts:
-            out.append({"role": role, "content": parts})
+        # Images lead, as in _user_content and for the same reason.
+        if parts or images:
+            out.append({"role": role, "content": [*images, *parts]})
     return out
+
+
+def _image_url(block: dict[str, Any]) -> str | None:
+    """An Anthropic image block → the URL string this dialect wants.
+
+    Both halves of the OpenAI-compatible family take an image as a URL and accept
+    a `data:` URI as one, so a base64 block needs no upload step. Rendered here
+    rather than in `warden/images.py` for the same reason tool_use is: this is
+    the provider's dialect, and the transcript's own vocabulary should not have
+    to know it.
+    """
+    source = block.get("source") or {}
+    if source.get("type") == "base64":
+        media_type = source.get("media_type") or "image/png"
+        return f"data:{media_type};base64,{source.get('data', '')}"
+    url = source.get("url")
+    return str(url) if url else None
+
+
+def _user_content(parts: list[str], images: list[dict[str, Any]]) -> Any:
+    """The `content` field for a user message, in the narrowest shape that fits.
+
+    Text alone stays a plain string — the shape every provider in this family
+    has been receiving, and not worth restating as a one-element block list for
+    the sake of symmetry when z.ai and Ollama are the ones who would find out.
+    A picture forces the multimodal list, and only then.
+
+    Images lead. Anthropic and OpenAI both report better grounding when the
+    image precedes the question about it, and it costs nothing to honour here.
+    """
+    text = "\n\n".join(p for p in parts if p)
+    if not images:
+        return text
+    blocks: list[dict[str, Any]] = []
+    for image in images:
+        url = _image_url(image)
+        if url:
+            blocks.append({"type": "image_url", "image_url": {"url": url}})
+    if text:
+        blocks.append({"type": "text", "text": text})
+    return blocks
 
 
 def _translate_message(message: dict[str, Any]) -> list[dict[str, Any]]:
     """One Anthropic-format message → one or more chat-completions messages.
     tool_result blocks become role:"tool" messages emitted before the user text,
-    preserving their adjacency to the assistant tool_calls that produced them."""
+    preserving their adjacency to the assistant tool_calls that produced them.
+
+    An `image` block becomes an `image_url` part. It used to match none of the
+    arms below and vanish here — the operator sent a screenshot, the request
+    carried the sentence without it, and a model that cannot see is not thereby
+    stopped from answering. If the selected model has no vision the provider now
+    says so in an error, which is the outcome worth having."""
     role = message["role"]
     content = message.get("content")
     if isinstance(content, str):
@@ -394,6 +451,7 @@ def _translate_message(message: dict[str, Any]) -> list[dict[str, Any]]:
 
     tool_msgs: list[dict[str, Any]] = []
     user_parts: list[str] = []
+    user_images: list[dict[str, Any]] = []
     assistant_text: list[str] = []
     tool_calls: list[dict[str, Any]] = []
 
@@ -401,6 +459,11 @@ def _translate_message(message: dict[str, Any]) -> list[dict[str, Any]]:
         btype = block.get("type")
         if btype == "text":
             (assistant_text if role == "assistant" else user_parts).append(block.get("text", ""))
+        elif btype == "image":
+            # Only ever on a user turn: no provider here returns image content,
+            # and an assistant message carrying one could not be replayed.
+            if role != "assistant":
+                user_images.append(block)
         elif btype == "tool_use":
             tool_calls.append({
                 "id": block["id"], "type": "function",
@@ -425,8 +488,8 @@ def _translate_message(message: dict[str, Any]) -> list[dict[str, Any]]:
             out.append({"role": "assistant", "content": text})
     else:
         out.extend(tool_msgs)
-        if user_parts:
-            out.append({"role": role, "content": "\n\n".join(user_parts)})
+        if user_parts or user_images:
+            out.append({"role": role, "content": _user_content(user_parts, user_images)})
     return out
 
 

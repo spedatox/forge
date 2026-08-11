@@ -328,6 +328,9 @@ class Session:
     Lives here rather than in a module-level registry because the alternative —
     keying on `id(session)` — silently misfires when CPython reuses an address.
     Cleared by `/clear` and `/compact`; see `status.forget_pressure`."""
+    checkpoints: list[dict[str, Any]] = field(default_factory=list)
+    """Conversation checkpoints taken with /checkpoint. Each is {turn, messages,
+    timestamp}. /restore reverts to one of these, discarding later turns."""
     input_bar: Any = None
     session_id: str = ""
     """Filename this conversation persists to. A resumed session keeps its

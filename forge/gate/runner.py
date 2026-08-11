@@ -25,6 +25,7 @@ from forge.gate.events import EventFan
 from forge.gate.protocol import JobEvent, JobRequest
 from forge.graph.sidecar import GraphSidecar
 from forge.model.base import Model
+from forge.warden import images
 from forge.warden.engine import Warden
 from forge.warden.toolsource import (
     BuiltinToolProvider,
@@ -122,6 +123,15 @@ async def run_job(
         # job; None means "use the profile's model_ref" (Rule 10: model IDs
         # live only in profiles, and the override is a profile-level concept).
         model_ref = request.model_override or cfg.model_ref
+        # A turn carrying a photo goes to the profile's vision model instead —
+        # Optimus is pinned to a text-only model and the picture would otherwise
+        # reach a provider that cannot read it. An explicit override still wins
+        # (README precedence: the job's model is highest), so a deliberate pick
+        # of a blind model fails out loud rather than being quietly overruled.
+        if (not request.model_override and cfg.vision_model
+                and images.has_image(request.history)):
+            model_ref = cfg.vision_model
+            await out("chunk", f"[image in this turn — using {model_ref}]\n")
         # One number: what a turn may produce is also what the ledger holds back
         # for the compaction call. If these drifted apart, compaction would
         # trigger with either too little room to finish or more than it needs.

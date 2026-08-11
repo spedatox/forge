@@ -215,6 +215,10 @@ if AVAILABLE:
                     self._files = []
             return self._files
 
+        def invalidate_cache(self) -> None:
+            """Clear the file list so the next completion re-scans the workspace."""
+            self._files = None
+
         def get_completions(self, document, complete_event):
             text = document.text_before_cursor
 
@@ -280,6 +284,7 @@ class InputBar:
         self._on_cycle_mode = on_cycle_mode
         self._on_toggle_expand = on_toggle_expand
         self._session = None
+        self._completer: Any = None
         self._last_interrupt = 0.0
         self.degraded_reason = "" if AVAILABLE else "prompt_toolkit is not installed"
         if AVAILABLE:
@@ -359,10 +364,12 @@ class InputBar:
             text = self._hint() if callable(self._hint) else self._hint
             return ANSI(text) if text else None
 
+        self._completer = ForgeCompleter(self._commands, self.workspace)
+
         return PromptSession(
             history=history,
             bottom_toolbar=_toolbar,
-            completer=ForgeCompleter(self._commands, self.workspace),
+            completer=self._completer,
             key_bindings=bindings,
             editing_mode=EditingMode.EMACS,   # ctrl+r reverse search comes with it
             complete_while_typing=True,
@@ -452,6 +459,11 @@ class InputBar:
             return False
         self._session.editing_mode = EditingMode.VI if on else EditingMode.EMACS
         return self.vi_mode
+
+    def invalidate_file_cache(self) -> None:
+        """Clear the @mention file cache so the next completion re-scans."""
+        if self._completer is not None:
+            self._completer.invalidate_cache()
 
     # ── reading ──────────────────────────────────────────────────────────────
 

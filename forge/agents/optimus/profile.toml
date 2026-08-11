@@ -26,6 +26,21 @@ domain = "systems, code & infrastructure"
 # revisit this line, not the prompt.
 model = "deepseek:deepseek-v4-pro"
 
+# Where a turn goes when it carries a photo. DeepSeek above cannot see one, and
+# until this existed the picture was dropped on the way to the request — the
+# operator sent a screenshot, the model got the sentence without it and answered
+# anyway, which is the one failure this harness is built to refuse.
+#
+# Anthropic rather than a cheaper vision model because it is the provider whose
+# key is already set for the fallback chain, and because a turn with a
+# screenshot in it is a turn where seeing correctly is the whole point. It
+# applies ONLY to turns whose transcript contains an image, so ordinary work
+# stays on the metered-cost model this profile picked it for.
+#
+# Blank it to turn the swap off; the picture is then sent to the model above and
+# the provider refuses it out loud, which is still better than losing it.
+vision_model = "claude-sonnet-4-6"
+
 # Tool allowlist — Optimus is a coding agent. "coding" expands to the curated
 # file / shell / graph tool group. This list IS the security boundary (§2/§4).
 #

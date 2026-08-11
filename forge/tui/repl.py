@@ -23,6 +23,7 @@ import os
 import time
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 from forge.agents.registry import AgentRegistry
 from forge.cell.factory import build_cell
@@ -30,7 +31,7 @@ from forge.cell.base import CellPolicy
 from forge.config import ForgeSettings
 from forge.extensions import load_extensions
 from forge.gate.protocol import JobRequest
-from forge.tui import ansi
+from forge.tui import ansi, attach
 from forge.tui.commands import command_help, resolve as resolve_command
 from forge.tui.render import StreamRenderer, banner, humanize_error
 from forge.tui import input as input_mod
@@ -45,6 +46,7 @@ from forge.warden.compaction import (
     render_for_summary,
     summarize,
 )
+from forge.warden import images
 from forge.warden.engine import Warden
 from forge.warden.filestate import FileStateCache
 from forge.warden.ledger import TokenLedger
@@ -166,7 +168,28 @@ async def _loop(session: Session, settings: ForgeSettings, extensions, verbose: 
         elif entry.kind == "bash":
             await _run_bash(entry.text, session)
         else:
-            await _run_turn(entry.text, session, settings, extensions, verbose)
+            await _run_turn(_attach(entry.text, session), session, settings,
+                            extensions, verbose)
+
+
+def _attach(text: str, session: Session):
+    """Turn a typed line into the content the turn carries.
+
+    Returns the text unchanged when nothing in it named a picture, which is
+    almost every line — so the transcript keeps its plain-string shape and only
+    a turn that actually has an image pays the block-list form.
+
+    Anything that looked like an image and could not be sent is reported here
+    and the turn goes ahead without it. Losing the whole prompt to one unreadable
+    path would cost the question that was typed with it.
+    """
+    found = attach.from_prompt(text, session.workspace)
+    for note in found.notes:
+        ansi.write(ansi.paint(f"  ⚠ {note}", "yellow"))
+    if found.names:
+        ansi.write(ansi.paint(
+            f"  ◆ attached {', '.join(found.names)}", "magenta"))
+    return found.content
 
 
 def _fold_if_huge(entry, session: Session):
@@ -337,13 +360,34 @@ async def _compact_now(session: Session) -> None:
         f"  ◆ {before} messages → {len(session.messages)}", "magenta"))
 
 
-def _build_model(session: Session):
+def _build_model(session: Session, model_ref: str | None = None):
     from forge.model.factory import build_model
     settings = ForgeSettings.from_env()
-    return build_model(session.model_ref, settings, max_tokens=settings.max_tokens)
+    return build_model(model_ref or session.model_ref, settings,
+                       max_tokens=settings.max_tokens)
 
 
-async def _run_turn(prompt: str, session: Session, settings: ForgeSettings,
+def _model_ref_for(session: Session, pending: list[dict]) -> str:
+    """Which model this turn runs on.
+
+    Normally the session's. A turn carrying a picture goes to the profile's
+    `vision_model` instead, because the default here is text-only and the image
+    would otherwise reach a provider that cannot read it.
+
+    `--model` still wins: an operator who named a model on the command line
+    meant it, and overruling that silently would be the worse surprise. The
+    picture is then sent to what they picked and refused out loud if it cannot
+    see, which is the outcome §9.5 asks for.
+    """
+    cfg = session.cfg
+    if not cfg.vision_model or session.model_ref != cfg.model_ref:
+        return session.model_ref
+    if not images.has_image([*session.messages, *pending]):
+        return session.model_ref
+    return cfg.vision_model
+
+
+async def _run_turn(prompt: Any, session: Session, settings: ForgeSettings,
                     extensions, verbose: bool) -> None:
     signal = asyncio.Event()
     spinner = LiveRegion()
@@ -372,7 +416,12 @@ async def _run_turn(prompt: str, session: Session, settings: ForgeSettings,
         hooks=list(extensions.hooks),
     )
 
-    model = _build_model(session)
+    turn_model_ref = _model_ref_for(session, [{"role": "user", "content": prompt}])
+    if turn_model_ref != session.model_ref:
+        # Never invisible. The status line says one model and this turn used
+        # another; unannounced, the next /cost reads as a billing mystery.
+        ansi.write(ansi.paint(f"  ◆ image in this turn — using {turn_model_ref}", "magenta"))
+    model = _build_model(session, turn_model_ref)
 
     async def _tools() -> dict:
         """The session's tools, minus the graph queries until a graph exists.
@@ -449,12 +498,15 @@ async def _run_turn(prompt: str, session: Session, settings: ForgeSettings,
             seconds=time.monotonic() - started)
 
 
-async def _drive(warden: Warden, session: Session, prompt: str):
-    """Run one turn over the session's accumulated transcript."""
-    if session.messages:
-        warden_state_messages = [*session.messages, {"role": "user", "content": prompt}]
-        return await warden.run_messages(warden_state_messages)
-    return await warden.run(prompt)
+async def _drive(warden: Warden, session: Session, prompt: Any):
+    """Run one turn over the session's accumulated transcript.
+
+    `prompt` is a string for an ordinary line and a content-block list when the
+    operator attached a picture. Both go through `run_messages`, which takes the
+    message whole — `warden.run` exists to wrap a bare string and would have to
+    grow a second shape to carry blocks."""
+    return await warden.run_messages(
+        [*session.messages, {"role": "user", "content": prompt}])
 
 
 def _system_prompt(session: Session, extensions) -> str:
@@ -469,12 +521,55 @@ def _system_prompt(session: Session, extensions) -> str:
 
     repo = conventions.fragment(session.workspace)
     owner = owner_memory.offline_fragment()
+    location = _workspace_location_fragment(session)
     return compose_system_prompt([
         PromptFragment("profile", session.cfg.system_prompt),
         *([owner] if owner else []),
+        *([location] if location else []),
         *([repo] if repo else []),
         *extensions.fragments,
     ])
+
+
+def _workspace_location_fragment(session: Session):
+    """Tell the agent where it actually is, so it does not give generic
+    sandbox disclaimers when it is working inside Hisar or a named project."""
+    from forge.agents.prompt import PromptFragment
+    from forge.tools.hisar import configured as hisar_configured
+
+    has_hisar = hisar_configured() and "hisar" in session.cfg.tools
+    path_str = str(session.workspace)
+
+    if has_hisar and "hisar" in path_str.lower():
+        text = (
+            f"Your workspace is at {path_str}.\n\n"
+            "This is a folder inside H.İ.S.A.R., the S.P.E.D.A. network's "
+            "cloud file vault. Files you create here are persistent cloud "
+            "storage — they survive between sessions and are accessible from "
+            "any device on the network. You can browse the full vault with "
+            "`hisar_list` and persist important deliverables with "
+            "`hisar_deposit`. The Cell sandbox still isolates your commands "
+            "from the host, but the workspace IS the vault: what you write "
+            "here lives in Hisar."
+        )
+    elif has_hisar:
+        text = (
+            f"Your workspace is at {path_str}.\n\n"
+            "H.İ.S.A.R. cloud storage is available in this session. Use "
+            "`hisar_list` to browse the vault and `hisar_deposit` to persist "
+            "files beyond this Cell — the vault survives; the workspace may "
+            "not. The Cell sandbox isolates your commands from the host."
+        )
+    else:
+        text = (
+            f"Your workspace is at {path_str}.\n\n"
+            "This is the project folder you were pointed at. Every shell "
+            "command and file operation runs inside an isolated sandbox (your "
+            "Cell), but the workspace is shared — files you write here are "
+            "real files on disk, and they are what the operator sees."
+        )
+
+    return PromptFragment("shared:workspace", text)
 
 
 def _turn_summary(terminal, session: Session, seconds: float) -> str:
