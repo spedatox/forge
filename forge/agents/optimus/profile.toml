@@ -42,7 +42,26 @@ model = "deepseek:deepseek-v4-pro"
 # open a project file, look up a person, or write down anything it learns. The
 # group is withheld automatically when there is no Mark VI on the other end, so
 # the standalone TUI is unaffected.
-tools = ["coding", "web", "memory"]
+#
+# "hisar" is the owner's file vault. Optimus is the agent it was built for: the
+# Cell workspace is scratch and does not survive the job, so a report or an
+# export the owner asked for has nowhere to land without it, and work filed in
+# an earlier session cannot be picked up again. Reads are unrestricted, writes
+# are confined to /SPEDA and /Forge by the server, and delete and rename are
+# owner-only — the boundary is Hisar's, not this line's.
+#
+# "notify" is a line to the owner's phone. `forge connect` runs on a box nobody
+# is logged into, which is the whole reason it exists: the job-finished message
+# already fires on its own, and this is the tool for the other case — something
+# mid-job the owner would want to know before it ends. Rationed by its own
+# description rather than by a counter, on the same argument ask_operator makes:
+# an agent that messages about everything gets muted, and then the one message
+# that mattered is muted too.
+#
+# Both are withheld automatically when the deployment has no vault token and no
+# bot (warden/toolsource.py), so naming them here is not a claim that either is
+# configured.
+tools = ["coding", "web", "memory", "hisar", "notify"]
 
 # One working mode with the safety gate always on; "plan" would make it
 # read-only for review (§6).

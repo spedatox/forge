@@ -245,6 +245,26 @@ One item may be in progress at a time.
 Requires the `graph` extra. Returns an error result when unavailable rather
 than failing the task.
 
+**Vault** — `hisar_list`, `hisar_read`, `hisar_deposit`
+
+Requires `HISAR_MACHINE_TOKEN`. The owner's file store, reached from the Forge
+process rather than the sandbox. Reads are unrestricted; writes are confined to
+`/SPEDA` and `/Forge`; deleting and renaming are owner-only and have no tool.
+Its own group rather than part of `coding`, so an agent is given a coding
+toolset without also being given the owner's documents.
+
+**Notification** — `telegram_send`
+
+Requires `FORGE_TELEGRAM_TOKEN` and `FORGE_TELEGRAM_CHAT_ID`. Messages the owner
+mid-job — a peer run has nobody watching the terminal. Job completion is
+reported automatically and needs no tool; this is for the case worth raising
+before the job ends. Its own group, for the same reason as the vault.
+
+Both are withheld from the toolset entirely when their credentials are unset,
+rather than being offered and failing: an agent has no way to tell a missing
+credential from a transient fault, and will retry a door that was never going to
+open.
+
 ---
 
 ## Execution model
@@ -452,10 +472,25 @@ timeout_s = 120
 |---|---|
 | `agent_id` | Identifier used on the wire and in job requests |
 | `model` | Model reference. Model identifiers live only in profiles. |
-| `tools` | Tool groups (`coding`, `web`, `security`) or individual tool names |
+| `tools` | Tool groups or individual tool names — see below |
 | `permission_mode` | `act` or `plan` |
 | `max_iterations` | Loop ceiling for a single task |
 | `[cell]` | Sandbox resource and network policy |
+
+`tools` takes any of these group names, individual tool names, or a mix:
+
+| Group | Contains |
+|---|---|
+| `coding` | Navigation, editing, execution, worktrees, planning, graph, delegation |
+| `security` | Navigation, editing and execution only — no graph |
+| `web` | `web_search`, `web_fetch` |
+| `memory` | `memory` — the owner's memory, held by Mark VI |
+| `hisar` | `hisar_list`, `hisar_read`, `hisar_deposit` |
+| `notify` | `telegram_send` |
+
+The last three are separate groups deliberately. They reach the owner rather
+than the repository, so an agent is given a coding toolset without also being
+given their documents, their memory, or a line to their phone.
 
 To add an agent, create the directory, write the two files, and run
 `forge agents` to confirm it loads.
@@ -498,6 +533,11 @@ without connecting to Mark VI.
 | `SPEDA_WS_URL` | `ws://127.0.0.1:8000/agents/ws/optimus` | Mark VI endpoint |
 | `SPEDA_API_KEY` | unset | Mark VI authentication |
 | `TAVILY_API_KEY` | unset | Required by `web_search` |
+| `HISAR_MACHINE_TOKEN` | unset | Required by the `hisar` tools |
+| `HISAR_URL` | `https://hisar.spedatox.systems` | Vault endpoint |
+| `FORGE_TELEGRAM_TOKEN` | unset | Bot token; `_<AGENT>` suffix overrides per agent |
+| `FORGE_TELEGRAM_CHAT_ID` | unset | Destination chat, required with the token |
+| `FORGE_NO_TELEGRAM` | unset | Suppress Telegram entirely |
 
 Provider keys are listed under [Model providers](#model-providers).
 See [`.env.example`](.env.example) for the annotated list.
