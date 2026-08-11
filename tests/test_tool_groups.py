@@ -164,21 +164,18 @@ def test_the_peer_can_reach_the_vault_and_the_owner(monkeypatch):
     assert {"hisar_list", "hisar_read", "hisar_deposit", "telegram_send"} <= set(tools)
 
 
-def test_the_security_agent_takes_neither(monkeypatch):
-    """Not an oversight this time — a decision, and one worth pinning.
-
-    Centurion's profile says its tool list IS the security boundary, and it is
-    deliberately the narrowest in the repo. Depositing engagement reports into
-    the vault is a real case for widening it, but widening a security agent's
-    reach is the owner's call to make explicitly, not a side effect of fixing
-    somebody else's wiring."""
+def test_the_security_agent_has_the_ecosystem_tools(monkeypatch):
+    """Centurion is the main agent now, not a narrow specialist. He takes hisar
+    (evidence vault for reports and pcaps) and notify (reach the operator mid-
+    engagement) because the operator explicitly widened his reach — a security
+    agent without durable output or a way to alert the operator is half-armed."""
     _configure_vault(monkeypatch)
     _configure_telegram(monkeypatch)
 
     tools = _resolved("centurion")
 
-    assert not {"hisar_list", "hisar_read", "hisar_deposit"} & set(tools)
-    assert "telegram_send" not in tools
+    assert {"hisar_list", "hisar_read", "hisar_deposit"} <= set(tools)
+    assert "telegram_send" in tools
 
 
 def test_the_two_groups_stay_separate():
