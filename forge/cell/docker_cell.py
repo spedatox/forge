@@ -32,6 +32,14 @@ WORKDIR = "/workspace"
 # it up front, and every other agent stays exactly as locked down as before.
 CELL_UID = 1000
 
+_EXEC_GRACE_S = 10
+"""How long the local client waits past the container-side deadline.
+
+The two timers are for different failures: the inner one kills a command that
+overran, the outer one gives up on a `docker exec` that never came back at all.
+Firing them together would make the outer one mask the inner, which is the
+arrangement that left processes running inside the container."""
+
 
 class DockerError(RuntimeError):
     pass
@@ -52,6 +60,13 @@ class DockerCell(Cell):
         # Unique per instance so two agents can never collide on one container (§9.1).
         self.container = f"forge-cell-{name_hint}-{uuid.uuid4().hex[:8]}"
         self._started = False
+        self._can_timeout = False
+        """Whether the image ships coreutils' `timeout`, settled once at start.
+
+        Probed rather than assumed: the default image has it, an arbitrary one
+        the operator points at may not, and wrapping every command in a binary
+        that is not there would turn one missing convenience into every command
+        failing with `sh: timeout: not found`."""
 
     @property
     def host_path(self) -> "Path | None":
@@ -125,6 +140,12 @@ class DockerCell(Cell):
                 f"Give {self.workspace_mount} to that uid, or make it group-writable "
                 f"for a group the uid belongs to."
             )
+        # One probe, so `run` never has to guess. A failure here means "no
+        # container-side deadline", which is the behaviour this Cell had all
+        # along — not a reason to refuse to start.
+        probe, _o, _e = await self._docker(
+            "exec", self.container, "sh", "-c", "command -v timeout", timeout=15)
+        self._can_timeout = probe == 0
         self._started = True
 
     def _hand_mount_to_cell_user(self) -> None:
@@ -166,9 +187,22 @@ class DockerCell(Cell):
             exec_args += ["--env", f"{k}={v}"]
         if self._subpath:
             command = f"cd {shlex.quote(self._workdir)} && {command}"
+        # Bounded INSIDE the container as well as outside. `wait_for` below only
+        # reaches the local `docker exec` client — killing it detaches from a
+        # process that carries on running in the container, holding the port it
+        # bound and eating the Cell's whole cpu/memory allowance for the rest of
+        # the job. The next command then times out too, and the one after that,
+        # which is what "Forge got stuck running a command" actually looks like
+        # from outside. Only when the image has `timeout`: a container without
+        # coreutils would answer `sh: timeout: not found` to everything, and a
+        # missing convenience must never break every command.
+        if self._can_timeout:
+            command = f"timeout -s KILL {t} sh -c {shlex.quote(command)}"
         exec_args += [self.container, "sh", "-c", command]
-        # `docker exec` has no built-in timeout; wrap the whole exec in wait_for.
-        code, out, err = await self._docker(*exec_args, timeout=t)
+        # The outer deadline is deliberately slack: the container-side kill is
+        # the one that should fire, and this is the backstop for a `docker exec`
+        # that hangs in the daemon rather than in the command.
+        code, out, err = await self._docker(*exec_args, timeout=t + _EXEC_GRACE_S)
         timed_out = code == 124
         return CommandResult(
             self._cap(out.decode("utf-8", "replace")),

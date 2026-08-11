@@ -351,6 +351,11 @@ async def _run_turn(prompt: str, session: Session, settings: ForgeSettings,
     # question and everything typed into it. A new Spinner exists per turn, so
     # the handoff happens here rather than at Session construction.
     session.oracle.spinner = spinner
+    # And the interrupt, for the same reason. A prompt is the one thing that can
+    # park a turn past every boundary where the signal would be checked, so it
+    # has to be able to read the signal itself — otherwise ctrl+c on a gated
+    # `run_command` sets a flag nothing ever looks at.
+    session.oracle.signal = signal
     renderer = StreamRenderer(
         verbose=verbose, spinner=spinner,
         on_truncated=lambda name, text: setattr(session, "last_truncated", (name, text)),
