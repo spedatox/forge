@@ -14,11 +14,24 @@ terminal that will never deliver a keystroke.
 from __future__ import annotations
 
 import sys
+import time
 
 UP = "up"
 DOWN = "down"
 ENTER = "enter"
 CANCEL = "cancel"
+
+NOTHING = "nothing"
+"""Nobody pressed anything before the caller's deadline.
+
+Distinct from None, which means this terminal will never deliver a key at all.
+The difference decides what the caller does next: None is "fall back to a typed
+line", NOTHING is "still waiting, go round again" — and a caller that cannot
+tell them apart either abandons a working prompt or blocks on a dead one."""
+
+_POLL_S = 0.02
+"""How often a bounded read looks for a keypress. Short enough that ctrl+c at a
+permission prompt feels immediate, long enough that waiting costs nothing."""
 
 
 def available() -> bool:
@@ -42,24 +55,58 @@ def available() -> bool:
         return False
 
 
-def read_key() -> str | None:
-    """One keypress as a name, a single character, or None if unreadable.
+def read_key(timeout: float | None = None) -> str | None:
+    """One keypress as a name, a single character, NOTHING, or None.
 
     Returns UP/DOWN/ENTER/CANCEL for the navigation keys, otherwise the
     lowercased character, so a caller can accept both `↓ ↵` and a typed `a`
     without knowing which arrived.
+
+    **`timeout` is what makes a prompt abandonable.** An unbounded read here is
+    a hold on the whole harness: the read runs in a worker thread, the turn is
+    parked inside one tool dispatch waiting for it, and the interrupt signal is
+    only ever checked at a loop boundary the turn can no longer reach. Ctrl+c
+    then does nothing at all — observed as Forge getting stuck running a
+    command, which is exactly the tool the gate stops. With a deadline the
+    caller gets the loop back a few times a second and can notice it has been
+    told to stop.
+
+    The deadline is also why this polls rather than reading and discarding: a
+    read already in flight consumes the next keypress whenever it finally
+    arrives, and that key would be stolen from the prompt the operator has
+    since returned to.
     """
     if not available():
         return None
     try:
-        return _read_win() if sys.platform == "win32" else _read_posix()
+        if sys.platform == "win32":
+            return _read_win(timeout)
+        return _read_posix(timeout)
     except Exception:  # noqa: BLE001 — an unreadable key is a fallback, not a crash
         return None
 
 
-def _read_win() -> str | None:
+def _wait_win(timeout: float | None) -> bool:
+    """True once a key is sitting in the console buffer. False on expiry."""
     import msvcrt
 
+    if timeout is None:
+        while not msvcrt.kbhit():
+            time.sleep(_POLL_S)
+        return True
+    deadline = time.monotonic() + timeout
+    while not msvcrt.kbhit():
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(min(_POLL_S, max(0.0, deadline - time.monotonic())))
+    return True
+
+
+def _read_win(timeout: float | None = None) -> str | None:
+    import msvcrt
+
+    if not _wait_win(timeout):
+        return NOTHING
     ch = msvcrt.getwch()
     # Arrows arrive as a two-character sequence led by NUL or 0xE0; the second
     # character is the actual key and MUST be consumed either way, or it is
@@ -75,14 +122,21 @@ def _read_win() -> str | None:
     return ch.lower()
 
 
-def _read_posix() -> str | None:
+def _read_posix(timeout: float | None = None) -> str | None:
+    import select
     import termios
     import tty
 
     fd = sys.stdin.fileno()
     saved = termios.tcgetattr(fd)
     try:
+        # Raw mode BEFORE the wait, not after. A tty in canonical mode reports
+        # itself readable only once a whole line has been entered, so polling a
+        # cooked terminal would sit through every single keypress and wake only
+        # on Enter — which is not a keypress reader at all.
         tty.setraw(fd)
+        if timeout is not None and not select.select([fd], [], [], timeout)[0]:
+            return NOTHING
         ch = sys.stdin.read(1)
         if ch == "\x1b":
             # CSI: ESC [ A/B. Read the rest so it cannot be mistaken for the

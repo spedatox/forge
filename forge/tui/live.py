@@ -127,7 +127,9 @@ class LiveRegion:
         try:
             while True:
                 if not self._paused:
-                    self.clear()
+                    # Repainted over, never cleared first. A clear-then-draw
+                    # tick leaves the region blank between the two writes, and
+                    # at 8 frames a second that gap IS the flicker.
                     self._draw()
                 await asyncio.sleep(TICK_S)
         except asyncio.CancelledError:
@@ -170,12 +172,20 @@ class LiveRegion:
     # ── drawing ──────────────────────────────────────────────────────────────
 
     def clear(self) -> None:
-        """Erase the whole region. The contract every caller already honours."""
+        """Erase the whole region, so real output can be written where it was.
+
+        Distinct from the tick's repaint: here the region is going away rather
+        than being replaced, so blanking is the point and there is no frame to
+        draw over it.
+
+        `_drawn` is only zeroed if the rewind actually happened. A failed
+        rewind means the rows are still on screen, and forgetting them would
+        leave the next frame to be drawn underneath instead of over."""
         if self._drawn <= 0:
             self.spinner.clear()
             return
-        ansi.rewind(self._drawn)
-        self._drawn = 0
+        if ansi.rewind(self._drawn):
+            self._drawn = 0
 
     def rows(self) -> list[str]:
         """The region's body, longest-running first.
@@ -214,21 +224,25 @@ class LiveRegion:
         bullet = "◆ " if subagent else "● "
         detail = r.target or r.note
         tail = f"({detail})" if detail and not subagent else (f"  {detail}" if detail else "")
-        return ansi.paint(f"{connector}{bullet}{r.label}{tail}  {r.elapsed:.0f}s", "dim")
+        # Bounded to one screen row. Rich's own rows already fit their column;
+        # this path had nothing holding it, and a row that wraps makes the
+        # region a line taller than MAX_ROWS was asked to allow.
+        body = ansi.truncate(f"{connector}{bullet}{r.label}{tail}  {r.elapsed:.0f}s",
+                             max(20, ansi.terminal_width() - 1))
+        return ansi.paint(body, "dim")
 
     def render(self) -> list[str]:
         """Header plus body, as the lines that will be written."""
         return [self.spinner.render(), *self.rows()]
 
     def _draw(self) -> None:
-        """Write the frame. Called by the spinner's tick in place of its own
-        single-line draw, so there is one clock and one writer.
+        """Paint one frame over the last, in a single write.
 
-        Each row gets a real newline, which is what makes this multi-row at all
-        — and is safe only because `clear()` rewinds exactly as many rows as
-        were written. That pairing is the entire no-scroll invariant.
-        """
-        lines = self.render()
-        for line in lines:
-            ansi.write(line)
-        self._drawn = len(lines)
+        `ansi.repaint` owns the two things that were wrong when this wrote the
+        rows itself. It counts SCREEN rows rather than list entries, so a row
+        the terminal wraps is reclaimed in full instead of leaving a line behind
+        per frame — and it draws nothing at all on a terminal that cannot
+        rewind, where the old code committed a frame every 120ms and reclaimed
+        none of them. That pairing, draw exactly what can be taken back, is the
+        entire no-scroll invariant."""
+        self._drawn = ansi.repaint(self.render(), self._drawn)

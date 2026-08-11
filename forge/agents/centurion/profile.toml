@@ -12,9 +12,16 @@ domain = "cyber security"
 # rather than two. See optimus/profile.toml for why it is not Anthropic.
 model = "deepseek:deepseek-v4-pro"
 
-# Tool allowlist — the "security" group: run security tooling in the Cell +
-# read/write scan output and reports. This list IS the security boundary (§2/§4).
-tools = ["security"]
+# Tool allowlist — Centurion is the main agent. "security" is his core (shell +
+# file I/O in the Cell), but he also needs the operator's ecosystem to be useful:
+#   hisar   — evidence vault; findings, pcaps, and reports survive Cell teardown
+#   web     — research CVEs, fetch advisory pages, look up exploit details
+#   memory  — the operator's notes, past engagement context, standing scope
+#   notify  — reach the operator mid-engagement if something urgent lands
+#
+# All four are withheld automatically when the deployment has no vault token / bot
+# / Mark VI channel, so naming them is not a claim that they are configured.
+tools = ["security", "hisar", "web", "memory", "notify"]
 
 # One working mode with the safety gate always on; "plan" would make it
 # read-only for reviewing an intended engagement before it runs (§6).

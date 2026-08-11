@@ -12,6 +12,7 @@ from forge.tools.diagnostics import Diagnostics
 from forge.tools.files import ReadFile, WriteFile, EditFile
 from forge.tools.graph import GraphQuery, GraphPath, GraphOverview, GraphIndex
 from forge.tools.hisar import HisarDeposit, HisarList, HisarRead
+from forge.tools.memory import Memory
 from forge.tools.search import Grep, Glob
 from forge.tools.task import TaskTool
 from forge.tools.telegram import TelegramSend
@@ -48,6 +49,13 @@ NOTIFY_TOOLS = [TelegramSend]
 # own when no operator is reachable, so it needs no dispatch-time gate.
 ASK_TOOLS = [AskOperator]
 
+# The owner's memory, which lives in Mark VI. Its own group because it is the
+# owner's, not the repository's — the same line the vault is on — and because a
+# profile should be able to take coding tools without being handed the power to
+# rewrite what every other agent believes about him. Withheld at dispatch when
+# there is no channel to Mark VI, so the standalone TUI never sees it.
+MEMORY_TOOLS = [Memory]
+
 # Reusable tool groups, referenced by agent configs via their allowlist (§2).
 # todo_write is in the coding group rather than its own: a plan is not an
 # optional capability for multi-step work, it is what keeps it coherent.
@@ -68,11 +76,11 @@ ALL_TOOLS = {cls.name: cls for cls in [
     RunCommand, ReadFile, WriteFile, EditFile, Grep, Glob,
     GraphQuery, GraphPath, GraphOverview, GraphIndex, Diagnostics, WebSearch, WebFetch, TodoWrite,
     EnterWorktree, ExitWorktree, TaskTool,
-    HisarList, HisarRead, HisarDeposit, TelegramSend, AskOperator,
+    HisarList, HisarRead, HisarDeposit, TelegramSend, AskOperator, Memory,
 ]}
 
 __all__ = ["ALL_TOOLS", "NAV_TOOLS", "CODING_TOOLS", "SECURITY_TOOLS", "WEB_TOOLS",
-           "HISAR_TOOLS", "NOTIFY_TOOLS", "ASK_TOOLS",
+           "HISAR_TOOLS", "NOTIFY_TOOLS", "ASK_TOOLS", "MEMORY_TOOLS", "Memory",
            "RunCommand", "ReadFile", "WriteFile", "EditFile", "Grep", "Glob",
            "GraphQuery", "GraphPath", "GraphOverview", "GraphIndex", "Diagnostics", "WebSearch", "WebFetch",
            "TodoWrite", "EnterWorktree", "ExitWorktree", "TaskTool",

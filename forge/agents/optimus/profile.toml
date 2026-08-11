@@ -26,6 +26,21 @@ domain = "systems, code & infrastructure"
 # revisit this line, not the prompt.
 model = "deepseek:deepseek-v4-pro"
 
+# Where a turn goes when it carries a photo. DeepSeek above cannot see one, and
+# until this existed the picture was dropped on the way to the request — the
+# operator sent a screenshot, the model got the sentence without it and answered
+# anyway, which is the one failure this harness is built to refuse.
+#
+# Anthropic rather than a cheaper vision model because it is the provider whose
+# key is already set for the fallback chain, and because a turn with a
+# screenshot in it is a turn where seeing correctly is the whole point. It
+# applies ONLY to turns whose transcript contains an image, so ordinary work
+# stays on the metered-cost model this profile picked it for.
+#
+# Blank it to turn the swap off; the picture is then sent to the model above and
+# the provider refuses it out loud, which is still better than losing it.
+vision_model = "claude-sonnet-4-6"
+
 # Tool allowlist — Optimus is a coding agent. "coding" expands to the curated
 # file / shell / graph tool group. This list IS the security boundary (§2/§4).
 #
@@ -34,7 +49,34 @@ model = "deepseek:deepseek-v4-pro"
 # or a changed API signature has to be guessed at. These are harness-side
 # instruments and do not touch the Cell's network posture below — see
 # forge/tools/web.py.
-tools = ["coding", "web"]
+#
+# "memory" is the owner's memory, which lives in Mark VI. It is a separate group
+# on purpose — it is the owner's, not the repository's, and it is shared with
+# every other agent that serves him. Without it the memory block that arrives on
+# every turn is instructing this agent to use a tool it does not have: it cannot
+# open a project file, look up a person, or write down anything it learns. The
+# group is withheld automatically when there is no Mark VI on the other end, so
+# the standalone TUI is unaffected.
+#
+# "hisar" is the owner's file vault. Optimus is the agent it was built for: the
+# Cell workspace is scratch and does not survive the job, so a report or an
+# export the owner asked for has nowhere to land without it, and work filed in
+# an earlier session cannot be picked up again. Reads are unrestricted, writes
+# are confined to /SPEDA and /Forge by the server, and delete and rename are
+# owner-only — the boundary is Hisar's, not this line's.
+#
+# "notify" is a line to the owner's phone. `forge connect` runs on a box nobody
+# is logged into, which is the whole reason it exists: the job-finished message
+# already fires on its own, and this is the tool for the other case — something
+# mid-job the owner would want to know before it ends. Rationed by its own
+# description rather than by a counter, on the same argument ask_operator makes:
+# an agent that messages about everything gets muted, and then the one message
+# that mattered is muted too.
+#
+# Both are withheld automatically when the deployment has no vault token and no
+# bot (warden/toolsource.py), so naming them here is not a claim that either is
+# configured.
+tools = ["coding", "web", "memory", "hisar", "notify"]
 
 # One working mode with the safety gate always on; "plan" would make it
 # read-only for review (§6).

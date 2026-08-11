@@ -36,8 +36,21 @@ class TerminalOracle:
     Ctrl-C at the prompt is a refusal, not a crash: interrupting the question is
     a perfectly clear way to say no."""
 
-    def __init__(self, spinner: Any = None) -> None:
+    def __init__(self, spinner: Any = None, signal: Any = None) -> None:
         self.asked: list[tuple[str, str]] = []
+        self.signal = signal
+        """The turn's interrupt event, so a prompt nobody is answering can be
+        abandoned.
+
+        Without it, ctrl+c at a permission prompt did nothing at all. The read
+        blocks in a worker thread, the turn is parked inside the tool dispatch
+        waiting on it, and `repl._run_turn` answers the interrupt by setting
+        this and then awaiting the loop — which cannot reach the boundary where
+        it would be checked, because the tool it is running has not returned.
+        The operator sees `Running run_command`, presses ctrl+c, and nothing
+        happens. Watching the event here is what closes that gap: the prompt is
+        the one place that can notice."""
+
         self.spinner = spinner
         """The live line, so it can be stopped while the question is on screen.
 
@@ -48,8 +61,16 @@ class TerminalOracle:
         not work" — the keystrokes were arriving, and nothing on screen said
         so."""
 
+    def _abandoned(self) -> bool:
+        """Has this turn been told to stop while the prompt was on screen?"""
+        return self.signal is not None and self.signal.is_set()
+
     async def ask(self, tool_name: str, action_key: str, reason: str) -> Answer:
         self.asked.append((tool_name, action_key))
+        if self._abandoned():
+            # Already interrupted before the gate even asked. Answering
+            # anything else would run the action the operator just stopped.
+            return Answer(False, note="the run was interrupted before this was approved")
         if self.spinner is not None:
             self.spinner.pause()
         try:
@@ -68,10 +89,15 @@ class TerminalOracle:
         for line in action_key.splitlines() or [action_key]:
             ansi.write("    " + ansi.paint(line, "bold"))
         ansi.write()
-        choice = await _choose()
+        choice = await _choose(self._abandoned)
         if choice is None:
             ansi.write()
             return Answer(False, note="interrupted at the prompt")
+        if choice == ABANDONED:
+            ansi.write()
+            ansi.write(ansi.paint("  ⏹ interrupted — the action was not taken", "yellow"))
+            return Answer(False, note="the operator interrupted the run while this "
+                                      "was waiting to be approved")
         if choice == "once":
             return Answer(True)
         if choice == "always":
@@ -91,6 +117,8 @@ class TerminalOracle:
         of "no", which is why an empty answer returns UNANSWERED and lets the
         agent proceed on its own judgement rather than being read as a refusal.
         """
+        if self._abandoned():
+            return UNANSWERED
         if self.spinner is not None:
             self.spinner.pause()
         try:
@@ -128,6 +156,13 @@ def _read_line(prompt: str) -> str:
         return ""
 
 
+_ABANDON_POLL_S = 0.15
+"""How often a waiting prompt looks up to see whether its run still exists.
+
+Fast enough that ctrl+c feels like it did something, slow enough that a prompt
+left open all afternoon is not a busy-wait."""
+
+
 _CHOICES = (
     ("once", "y", "Yes"),
     ("always", "a", "Yes, and don't ask again for this exact action"),
@@ -149,8 +184,17 @@ was ever put into it.
 """
 
 
-async def _choose() -> str | None:
-    """The operator's answer, or None if they interrupted.
+ABANDONED = "abandoned"
+"""The turn was interrupted while this prompt was waiting to be answered.
+
+Not one of `_CHOICES`: the operator did not decline the action, they stopped
+the run that wanted it. Both end with the action not happening, and they read
+completely differently in a transcript — "the operator said no to this" invites
+the model to find another way, and "the run was stopped" does not."""
+
+
+async def _choose(abandoned: Any = None) -> str | None:
+    """The operator's answer, ABANDONED, or None if they interrupted.
 
     Arrows where the console can give us keys one at a time, a typed word where
     it cannot. Deliberately NOT built on prompt_toolkit: that is what powers
@@ -158,11 +202,19 @@ async def _choose() -> str | None:
     terminals — which is the situation a permission prompt most needs to
     survive. Reading the console directly (forge/tui/keys.py) means the
     selector works in terminals where the line editor does not.
+
+    `abandoned` is polled rather than awaited because the read it is racing
+    happens in a thread, and a thread cannot be cancelled. Handing the
+    predicate down to the reader — which already has to wake periodically to
+    poll the console — costs nothing and is the only place with a loop to check
+    it in.
     """
     if keys.available():
-        picked = await asyncio.to_thread(_select_sync)
+        picked = await asyncio.to_thread(_select_sync, abandoned)
         if picked is not None:
             return picked
+    if abandoned is not None and abandoned():
+        return ABANDONED
     return await asyncio.to_thread(_typed_sync)
 
 
@@ -174,21 +226,33 @@ def _render_options(cursor: int) -> None:
             ansi.write("    " + ansi.paint(f"{name:<7} {blurb}", "grey"))
 
 
-def _select_sync() -> str | None:
+def _select_sync(abandoned: Any = None) -> str | None:
     """An arrow-driven list, repainted in place.
 
     Refusal is the cursor's starting position. On a gate, the answer reached by
     the least deliberate keystroke should be the one that does nothing.
+
+    The read is bounded so the loop comes back a few times a second even when
+    nobody touches the keyboard. That is not for the prompt's benefit — it is
+    the only opportunity anything has to notice the turn was interrupted, and
+    without it ctrl+c on a gated command did nothing whatsoever.
     """
     cursor = len(_CHOICES) - 1          # "no"
     _render_options(cursor)
     ansi.write(ansi.paint("    ↑↓ to choose · enter to confirm · or type y/a/n/t",
                           "dim"))
 
+    poll = _ABANDON_POLL_S if abandoned is not None else None
     while True:
-        key = keys.read_key()
+        key = keys.read_key(timeout=poll)
         if key is None:                 # console stopped cooperating mid-prompt
             return None
+        if key == keys.NOTHING:
+            # Nobody has answered yet. The only question worth asking between
+            # keypresses is whether this prompt still has a run behind it.
+            if abandoned is not None and abandoned():
+                return ABANDONED
+            continue
         if key == keys.CANCEL:
             return "no"
         if key == keys.ENTER:
@@ -264,6 +328,9 @@ class Session:
     Lives here rather than in a module-level registry because the alternative —
     keying on `id(session)` — silently misfires when CPython reuses an address.
     Cleared by `/clear` and `/compact`; see `status.forget_pressure`."""
+    checkpoints: list[dict[str, Any]] = field(default_factory=list)
+    """Conversation checkpoints taken with /checkpoint. Each is {turn, messages,
+    timestamp}. /restore reverts to one of these, discarding later turns."""
     input_bar: Any = None
     session_id: str = ""
     """Filename this conversation persists to. A resumed session keeps its

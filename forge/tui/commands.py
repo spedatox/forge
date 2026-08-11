@@ -100,6 +100,75 @@ async def _compact(args: str, session: "Session") -> CommandResult:
     return CommandResult(compact=True)
 
 
+@command("checkpoint", "snapshot the conversation so you can rewind to here")
+async def _checkpoint(args: str, session: "Session") -> CommandResult:
+    import copy
+    from datetime import datetime
+
+    if not session.messages:
+        return CommandResult("  Nothing to checkpoint yet — the conversation is empty.")
+    cp = {
+        "turn": session.turns,
+        "messages": copy.deepcopy(session.messages),
+        "timestamp": datetime.now().strftime("%H:%M:%S"),
+    }
+    session.checkpoints.append(cp)
+    n = len(session.checkpoints)
+    return CommandResult(
+        f"  Checkpoint {n} saved — turn {session.turns}, "
+        f"{len(session.messages)} messages.  /restore {n} to rewind here.")
+
+
+@command("restore", "rewind the conversation to an earlier checkpoint")
+async def _restore(args: str, session: "Session") -> CommandResult:
+    arg = args.strip()
+    if not session.checkpoints:
+        return CommandResult("  No checkpoints. Use /checkpoint first, then /restore to rewind.")
+
+    if not arg:
+        # Restore to the latest checkpoint.
+        cp = session.checkpoints[-1]
+        session.messages = cp["messages"]
+        session.turns = cp["turn"]
+        # Discard all checkpoints after the one we restored to — they describe
+        # turns that no longer exist.
+        return CommandResult(
+            f"  Restored to checkpoint {len(session.checkpoints)}"
+            f" (turn {cp['turn']}, {cp['timestamp']}).")
+
+    # /restore N — restore to a specific checkpoint index.
+    try:
+        n = int(arg)
+    except ValueError:
+        return CommandResult(f"  {arg!r} is not a checkpoint number. /checkpoints to list them.")
+    if n < 1 or n > len(session.checkpoints):
+        return CommandResult(
+            f"  {n} is not a valid checkpoint. You have {len(session.checkpoints)}"
+            f" — /checkpoints to list them.")
+
+    cp = session.checkpoints[n - 1]
+    session.messages = cp["messages"]
+    session.turns = cp["turn"]
+    # Discard checkpoints after the restored one.
+    session.checkpoints = session.checkpoints[:n - 1]
+    return CommandResult(
+        f"  Restored to checkpoint {n} (turn {cp['turn']}, {cp['timestamp']})."
+        f"\n  Later checkpoints were discarded — the turns they captured are gone.")
+
+
+@command("checkpoints", "list saved checkpoints", "cps")
+async def _checkpoints_cmd(args: str, session: "Session") -> CommandResult:
+    if not session.checkpoints:
+        return CommandResult("  No checkpoints yet. /checkpoint to save one.")
+    lines = []
+    for i, cp in enumerate(session.checkpoints, 1):
+        lines.append(
+            f"  {i}. turn {cp['turn']} · {cp['timestamp']}"
+            f" · {len(cp['messages'])} messages")
+    lines.append(f"\n  /restore {len(session.checkpoints)} to rewind to the latest.")
+    return CommandResult("\n".join(lines))
+
+
 @command("cost", "what this session has spent")
 async def _cost(args: str, session: "Session") -> CommandResult:
     led = session.ledger
@@ -196,6 +265,32 @@ async def _transcript(args: str, session: "Session") -> CommandResult:
 @command("cwd", "which directory the agent is working in")
 async def _cwd(args: str, session: "Session") -> CommandResult:
     return CommandResult(f"  {session.workspace}")
+
+
+@command("mkdir", "create a directory inside the workspace")
+async def _mkdir(args: str, session: "Session") -> CommandResult:
+    name = args.strip()
+    if not name:
+        return CommandResult("  /mkdir <path> — the directory to create, relative to the workspace.")
+    target = (session.workspace / name).resolve()
+    # Refuse to create outside the workspace — `/mkdir ../escape` must not
+    # reach the parent directory, even though the Cell cannot either.
+    try:
+        target.relative_to(session.workspace)
+    except ValueError:
+        return CommandResult(f"  {name!r} is outside the workspace — refused.")
+    already = target.is_dir()
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        return CommandResult(f"  Could not create {name}: {e}")
+    # Invalidate the @mention file cache so completions pick up the new directory.
+    bar = session.input_bar
+    if bar is not None and hasattr(bar, "invalidate_file_cache"):
+        bar.invalidate_file_cache()
+    if already:
+        return CommandResult(f"  {name} already exists.\n  {target}")
+    return CommandResult(f"  Created {name}\n  {target}")
 
 
 def command_help() -> dict[str, str]:

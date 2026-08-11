@@ -16,6 +16,8 @@ from __future__ import annotations
 import asyncio
 import os
 import shutil
+import signal
+import subprocess
 from pathlib import Path
 
 from forge.cell.base import Cell, CellPolicy, CommandResult
@@ -46,6 +48,65 @@ def _posix_shell() -> str | None:
         if Path(candidate).exists():
             return candidate
     return None
+
+
+def _own_process_group() -> dict:
+    """Launch kwargs that put the command in a group of its own.
+
+    Without this there is nothing to kill but the shell. `pytest`, `npm`, a dev
+    server — everything an agent actually runs is a CHILD of that shell, and
+    killing the parent leaves the children holding the port, the lock and the
+    file handles. The command reports "timed out", the next one inherits a
+    workspace that is still busy, and Forge looks stuck running a command it
+    has not started yet.
+
+    A group is also the only handle that survives the shell exiting first, so
+    it is set at launch rather than looked up at kill time."""
+    if os.name == "nt":
+        # CREATE_NEW_PROCESS_GROUP. Named rather than imported from subprocess
+        # so this module still reads on POSIX, where the constant is absent.
+        return {"creationflags": 0x00000200}
+    return {"start_new_session": True}
+
+
+def _kill_tree(proc) -> None:
+    """Kill the command and everything it started. Best-effort throughout.
+
+    A process that has already exited, a group that is already gone, a
+    `taskkill` that is not on PATH — none of those is a reason to fail the
+    call, which is going to report a timeout either way. What matters is that
+    the common case stops leaving processes behind."""
+    pid = proc.pid
+    try:
+        if os.name == "nt":
+            # /T is the whole point: it takes the tree, not just the shell.
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           check=False, timeout=10)
+        else:
+            os.killpg(os.getpgid(pid), signal.SIGKILL)
+    except Exception:  # noqa: BLE001 — see docstring
+        pass
+    try:
+        proc.kill()                 # the shell itself, if it outlived the group
+    except (ProcessLookupError, OSError):
+        pass
+
+
+def _release_pipes(proc) -> None:
+    """Close the pipes a cancelled `communicate()` left open.
+
+    Abandoning `communicate()` abandons its transport with it, and asyncio
+    complains about the unclosed pipe from a destructor later — at a point with
+    no connection to the command that caused it. A long session times out more
+    than one command, and a handle leaked per timeout is a slow one."""
+    transport = getattr(proc, "_transport", None)
+    if transport is None:
+        return
+    try:
+        transport.close()
+    except Exception:  # noqa: BLE001 — already closed, or never opened
+        pass
 
 
 class SubprocessCell(Cell):
@@ -117,6 +178,7 @@ class SubprocessCell(Cell):
                     env=self._base_env(env),
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
+                    **_own_process_group(),
                 )
             else:
                 proc = await asyncio.create_subprocess_shell(
@@ -125,16 +187,27 @@ class SubprocessCell(Cell):
                     env=self._base_env(env),
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
+                    **_own_process_group(),
                 )
         except OSError as e:
             return CommandResult("", f"failed to launch command: {e}", 1, False)
         try:
             out, err = await asyncio.wait_for(proc.communicate(), timeout=t)
         except asyncio.TimeoutError:
+            _kill_tree(proc)
+            # Pipes released BEFORE the reap, and the order is the whole point.
+            # `communicate()` was cancelled by the deadline with its readers
+            # still attached, and on a cancelled transport `wait()` does not
+            # come back when the process dies — it comes back when the readers
+            # do. Waiting first meant every timed-out command paid the full
+            # backstop below before returning. Closing the transport ends the
+            # readers, and the reap is then immediate.
+            _release_pipes(proc)
+            # Bounded even so: a cleanup path that can block forever is the bug
+            # this is fixing wearing a different hat.
             try:
-                proc.kill()
-                await proc.wait()
-            except ProcessLookupError:
+                await asyncio.wait_for(proc.wait(), timeout=5)
+            except (asyncio.TimeoutError, ProcessLookupError):
                 pass
             return CommandResult("", f"command timed out after {t}s", 124, True)
         return CommandResult(

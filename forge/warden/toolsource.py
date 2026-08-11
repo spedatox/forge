@@ -77,6 +77,18 @@ def without_hisar_tools(tools: dict[str, Tool]) -> dict[str, Tool]:
             if name not in HISAR_TOOL_NAMES}
 
 
+#: The owner's memory. Same rule again, one layer along: it is withheld when the
+#: run has no channel to Mark VI rather than when the deployment lacks a
+#: credential, so it is filtered per job like the graph set and not once at
+#: startup like the vault. The standalone TUI has no backend and never sees it.
+MEMORY_TOOL_NAMES = ("memory",)
+
+
+def without_memory_tools(tools: dict[str, Tool]) -> dict[str, Tool]:
+    return {name: tool for name, tool in tools.items()
+            if name not in MEMORY_TOOL_NAMES}
+
+
 def resolve_optional(tools: dict[str, Tool]) -> dict[str, Tool]:
     """Drop every optional group this deployment cannot actually serve.
 

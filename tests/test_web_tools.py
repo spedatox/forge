@@ -98,16 +98,17 @@ def test_web_is_not_bundled_into_coding():
     assert "web_search" not in coding and "web_fetch" not in coding
 
 
-def test_optimus_has_web_but_centurion_does_not():
-    """Research is Optimus's job. Centurion's allowlist is its own boundary and
-    gaining the open internet must be a deliberate edit to its profile, not a
-    side effect of adding a tool group."""
+def test_both_agents_can_reach_the_web():
+    """Centurion is the main agent now and needs the same research reach as
+    Optimus — unfamiliar CVEs, advisory pages, exploit details. Both agents
+    declare web_search and web_fetch."""
     from forge.agents.registry import AgentRegistry
 
     registry = AgentRegistry.load()
-    assert "web_search" in registry.get("optimus").tool_names
-    assert "web_fetch" in registry.get("optimus").tool_names
-    assert "web_search" not in registry.get("centurion").tool_names
+    for agent_id in ("optimus", "centurion"):
+        tools = set(registry.get(agent_id).tool_names)
+        assert "web_search" in tools, f"{agent_id} missing web_search"
+        assert "web_fetch" in tools, f"{agent_id} missing web_fetch"
 
 
 def test_both_declare_read_only_and_concurrency_safe():
