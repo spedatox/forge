@@ -1,0 +1,26 @@
+[Unit]
+Description=free-claude-code API proxy for Claude Code
+Documentation=https://github.com/alishahryar1/free-claude-code
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# The proxy reads provider keys from its own environment. These are the same
+# keys Igor uses — loading its .env rather than duplicating them means a key
+# rotation happens in ONE place and this unit picks it up on restart.
+EnvironmentFile=/opt/speda/packages/igor/.env
+ExecStart=/root/.local/bin/fcc-server
+Restart=always
+RestartSec=5s
+
+# The proxy binds to localhost:8082 and serves only the Cell's Docker bridge
+# gateway (172.17.0.1:8082 from inside a container). It never listens on a
+# public interface, so the only risk surface is a compromised Cell reaching
+# it — and an agent that owns the Cell can already spend the same keys directly.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=fcc-server
+
+[Install]
+WantedBy=multi-user.target

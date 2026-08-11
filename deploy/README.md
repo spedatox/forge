@@ -90,8 +90,8 @@ workspace now fails loudly at startup instead of on its first write.
 
 ## 4. Service
 
-The unit is **templated on the agent id**, so each agent is one more instance
-rather than one more file:
+The forge unit is **templated on the agent id**, so each agent is one more
+instance rather than one more file:
 
 ```bash
 cp deploy/forge@.service /etc/systemd/system/
@@ -100,15 +100,25 @@ systemctl enable --now forge@optimus forge@centurion
 journalctl -u 'forge@*' -f      # expect: peer_registered, once per agent
 ```
 
+The free-claude-code proxy is a separate unit — one instance serves every Cell:
+
+```bash
+cp deploy/fcc-server.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now fcc-server
+```
+
 `EnvironmentFile` is load-bearing: `forge/__main__.py` reads `os.environ`
 directly and loads no `.env` itself.
 
 ## 5. Verify
 
 ```bash
-systemctl is-active forge@optimus forge@centurion
+systemctl is-active forge@optimus forge@centurion fcc-server
 journalctl -u 'forge@*' -n 10 | grep peer_registered
-curl -sS -H "X-API-Key: $SPEDA_API_KEY" localhost:8000/agents   # both online
+journalctl -u fcc-server -n 5 | grep -i 'listening\|started'
+curl -sS -H "X-API-Key: $SPEDA_API_KEY" localhost:8000/agents   # forge peers online
+curl -sS http://localhost:8082/health                            # proxy reachable
 ```
 
 A restart should take well under a second. If it takes 20s and the journal says
@@ -130,7 +140,76 @@ knowing before dispatching to it. Its profile also expects security tooling
 `python:3.12-slim`, which carries none of it — see the `.env.centurion` seam
 in §2.
 
-## 7. Updating
+## 7. Claude Code proxy (free-claude-code)
+
+The `claude_code` tool delegates to the real Claude Code CLI, which must be
+installed in the Cell image alongside Node.js. Its API calls route through the
+`fcc-server` proxy on the host, reachable from inside a container at the Docker
+bridge gateway (`172.17.0.1:8082`).
+
+### Host setup
+
+```bash
+# Install the proxy server
+npm install -g free-claude-code
+
+# Start it
+systemctl enable --now fcc-server
+```
+
+The proxy reads provider keys from Igor's `.env` (same `EnvironmentFile` the
+forge unit uses). Which provider Claude Code actually hits depends on how the
+proxy's admin UI is configured — point it at DeepSeek (key already in Igor's
+env) or whichever provider you want the delegated work to use.
+
+### Cell image requirements
+
+The default `python:3.12-slim` image has no Node.js, so the `claude_code` tool
+reports "fcc-claude is not installed" and the model falls back to the `task`
+tool. To make it available, either:
+
+**A. Install at runtime** (the agent does this once per session):
+```bash
+apt-get update && apt-get install -y nodejs npm
+npm install -g @anthropic-ai/claude-code free-claude-code
+```
+
+**B. Build a custom image** that bakes it in:
+```dockerfile
+FROM python:3.12-slim
+RUN apt-get update && apt-get install -y nodejs npm \
+    && npm install -g @anthropic-ai/claude-code free-claude-code \
+    && rm -rf /var/lib/apt/lists/*
+```
+Then set `FORGE_CELL_IMAGE=forge-cell-claude:latest` in `/opt/forge-mk1/.env`.
+
+Option B is strongly preferred: installing every session adds minutes of
+wall-clock to every `claude_code` call and burns tokens on setup the model
+has to remember to do.
+
+### Network posture
+
+The Cell reaches the proxy over the Docker bridge. That means the agent's
+profile MUST set `allow_network = true` for `claude_code` to work — the proxy
+is on the host, not inside the Cell, and without network the connection is
+refused at the TCP level. The `claude_code` tool itself does not bypass this;
+it fails with a clear error if the Cell cannot reach the proxy.
+
+This is the same posture Centurion already uses (its profile declares network),
+but it is worth flagging because Optimus's default is `--network none`. To give
+Optimus access to Claude Code, add `allow_network = true` to its profile.
+The proxy only listens on localhost, so the risk surface is the Cell itself —
+an agent that already owns the Cell can spend the same provider keys directly.
+
+### .env additions
+
+```ini
+# The proxy URL from inside the Cell. 172.17.0.1 is the Docker bridge gateway —
+# the host as seen from a container on the default bridge network.
+CLAUDE_CODE_SERVER_URL=http://172.17.0.1:8082
+```
+
+## 8. Updating
 
 **CI deploys this.** `.github/workflows/ci.yml` runs the suite and the demo on
 every branch, and on a green push to `main` it SSHes in and does everything

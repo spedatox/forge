@@ -8,6 +8,7 @@ never sees them.
 """
 from forge.tools.shell import RunCommand
 from forge.tools.ask import AskOperator
+from forge.tools.claude_code import ClaudeCode
 from forge.tools.diagnostics import Diagnostics
 from forge.tools.files import ReadFile, WriteFile, EditFile
 from forge.tools.graph import GraphQuery, GraphPath, GraphOverview, GraphIndex
@@ -56,7 +57,7 @@ ASK_TOOLS = [AskOperator]
 # context. A profile that omits it simply never spawns subagents.
 CODING_TOOLS = [*NAV_TOOLS, WriteFile, EditFile, RunCommand,
                 GraphQuery, GraphPath, GraphOverview, GraphIndex, Diagnostics, TodoWrite,
-                EnterWorktree, ExitWorktree, TaskTool, AskOperator]
+                EnterWorktree, ExitWorktree, TaskTool, ClaudeCode, AskOperator]
 
 # Centurion's group: run security tooling in the Cell (RunCommand) and read/write
 # scan output and engagement reports (files). No graph — its subject is a live
@@ -67,7 +68,7 @@ SECURITY_TOOLS = [*NAV_TOOLS, RunCommand, WriteFile, EditFile]
 ALL_TOOLS = {cls.name: cls for cls in [
     RunCommand, ReadFile, WriteFile, EditFile, Grep, Glob,
     GraphQuery, GraphPath, GraphOverview, GraphIndex, Diagnostics, WebSearch, WebFetch, TodoWrite,
-    EnterWorktree, ExitWorktree, TaskTool,
+    EnterWorktree, ExitWorktree, TaskTool, ClaudeCode,
     HisarList, HisarRead, HisarDeposit, TelegramSend, AskOperator,
 ]}
 
@@ -75,5 +76,5 @@ __all__ = ["ALL_TOOLS", "NAV_TOOLS", "CODING_TOOLS", "SECURITY_TOOLS", "WEB_TOOL
            "HISAR_TOOLS", "NOTIFY_TOOLS", "ASK_TOOLS",
            "RunCommand", "ReadFile", "WriteFile", "EditFile", "Grep", "Glob",
            "GraphQuery", "GraphPath", "GraphOverview", "GraphIndex", "Diagnostics", "WebSearch", "WebFetch",
-           "TodoWrite", "EnterWorktree", "ExitWorktree", "TaskTool",
+           "TodoWrite", "EnterWorktree", "ExitWorktree", "TaskTool", "ClaudeCode",
            "HisarList", "HisarRead", "HisarDeposit", "TelegramSend", "AskOperator"]
