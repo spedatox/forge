@@ -11,6 +11,7 @@ wrong by one row per frame and the conversation is buried under dead frames.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 
 from forge.tui import ansi, ui
@@ -39,15 +40,100 @@ def test_clear_erases_exactly_what_was_drawn():
     ansi.write = lambda text="", end="\n": None
     ansi.rewind = lambda n: (rewound.append(n), True)[1]
     try:
-        r = _region(alpha=1.0, beta=2.0)
-        r._draw()
-        drawn = r._drawn
-        r.clear()
+        with _styled():
+            r = _region(alpha=1.0, beta=2.0)
+            r._draw()
+            drawn = r._drawn
+            r.clear()
     finally:
         ansi.write, ansi.rewind = real_write, real_rewind
 
     assert drawn == 3, "header plus two rows"
     assert rewound == [3], "cleared exactly the rows it drew"
+
+
+# ── Drawing only what can be taken back ──────────────────────────────────────
+
+@contextlib.contextmanager
+def _styled(width: int = 200):
+    """A terminal that takes escape sequences, which the test process is not.
+
+    Every assertion about reclaiming rows is vacuous without this: `rewind` is a
+    no-op on an unstyled stream, so a region that drew anyway would look correct
+    to a test that stubbed `rewind` to succeed. That is exactly how the flood
+    below went unnoticed."""
+    was = ansi._ENABLED                       # noqa: SLF001
+    ansi._ENABLED = True                      # noqa: SLF001
+    real = ansi.terminal_width
+    ansi.terminal_width = lambda default=80: width
+    try:
+        yield
+    finally:
+        ansi._ENABLED = was                   # noqa: SLF001
+        ansi.terminal_width = real
+
+
+def test_it_draws_nothing_where_it_cannot_rewind():
+    """NO_COLOR, a dumb TERM, a pipe, a Windows console that refused VT mode.
+
+    `Spinner` is silent in all four because `transient` no-ops. This drew with
+    `write` and reclaimed with `rewind`, so every tick was committed and none
+    taken back: the region flowed down the screen a frame at a time instead of
+    updating in place."""
+    out: list[str] = []
+    real = ansi.write
+    ansi.write = lambda text="", end="\n": out.append(text + end)
+    try:
+        assert ansi.styled() is False, "the test process has no tty"
+        r = _region(alpha=1.0)
+        r._draw()
+        r._draw()
+        r._draw()
+    finally:
+        ansi.write = real
+    assert out == [], "an unrewindable terminal gets silence, not a frame per tick"
+    assert r._drawn == 0
+
+
+def test_a_wrapped_row_is_measured_in_screen_rows():
+    """`len(lines)` is not the height of the region.
+
+    A row wider than the terminal occupies two rows and is reclaimed as one, so
+    the frame creeps down the screen leaving a line of debris per tick — the
+    "it updates in place but keeps blinking" shape."""
+    with _styled(width=40):
+        r = LiveRegion()
+        r.spinner.start_clock()
+        r.tool_started("1", "Run", "x" * 120)      # far past 40 columns
+        out: list[str] = []
+        real = ansi.write
+        ansi.write = lambda text="", end="\n": out.append(text + end)
+        try:
+            r._draw()
+        finally:
+            ansi.write = real
+    lines = r.render()
+    expected = sum(ansi.wrapped_height(ln, 40) for ln in lines)
+    assert r._drawn == expected
+    assert r._drawn > len(lines), "the long row wrapped; the count has to know"
+
+
+def test_a_frame_is_drawn_in_one_write():
+    """Flicker is not a rendering detail, it is the blank gap between an erase
+    and the redraw that follows it. One write, and there is no gap to see."""
+    with _styled():
+        r = _region(alpha=1.0, beta=2.0)
+        writes: list[str] = []
+        real = ansi.write
+        ansi.write = lambda text="", end="\n": writes.append(text + end)
+        try:
+            r._draw()
+            r._draw()
+        finally:
+            ansi.write = real
+    assert len(writes) == 2, "one write per frame, not one per row plus a clear"
+    assert "\x1b[J" not in writes[0].rsplit("\x1b[J", 1)[0], "erase only at the end"
+    assert writes[1].startswith("\r\x1b["), "the second frame moves up, it does not blank"
 
 
 def test_clear_is_harmless_before_anything_is_drawn():
@@ -59,23 +145,28 @@ def test_a_frame_is_erased_before_the_next_is_drawn():
     net = 0
     real_write, real_rewind = ansi.write, ansi.rewind
 
-    def _w(text="", end="\n"):
-        nonlocal net
-        net += end.count("\n")
-
     def _r(n):
         nonlocal net
         net -= n
         return True
 
+    def _w(text="", end="\n"):
+        """Counts what the frame commits AND what its cursor-up takes back —
+        `repaint` writes both in one payload, so the tally has to read it."""
+        nonlocal net
+        net += (text + end).count("\n")
+        for move in ansi._ESCAPE_UP.findall(text):       # noqa: SLF001
+            net -= int(move or 1)
+
     async def scenario():
         ansi.write, ansi.rewind = _w, _r
         try:
-            r = LiveRegion()
-            r.tool_started("1", "Grep", "x")
-            r.start()
-            await asyncio.sleep(0.5)
-            await r.stop()
+            with _styled():
+                r = LiveRegion()
+                r.tool_started("1", "Grep", "x")
+                r.start()
+                await asyncio.sleep(0.5)
+                await r.stop()
         finally:
             ansi.write, ansi.rewind = real_write, real_rewind
 
