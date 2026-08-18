@@ -12,7 +12,7 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 from forge.warden.subagents import BUILT_INS, catalogue, spec_for
-from forge.warden.tool import Tool, ToolContext, ToolResult
+from forge.warden.tool import SELF_BOUNDED, Tool, ToolContext, ToolResult
 
 
 class TaskArgs(BaseModel):
@@ -58,6 +58,21 @@ class TaskTool(Tool):
     READ_ONLY = False
     CONCURRENCY_SAFE = True    # several may run at once; SubagentRunner caps it
     DESTRUCTIVE = False
+
+    TIMEOUT_S = SELF_BOUNDED
+    """The child loop's own ceiling is the only correct stopping condition.
+
+    A subagent is already bounded, and bounded better than a wall clock can do
+    it: `max_iterations`, and a `_wind_down` that spends the last turn writing a
+    handover. Cancelling it at an arbitrary second throws all of that away —
+    every file it read, every conclusion it reached, and specifically the
+    handover, which is the one artefact that would have made the lost work
+    resumable. A slow subagent is the case where the backstop's cure is
+    reliably worse than the disease.
+
+    It is not unbounded, and this is not an exemption from being stoppable: the
+    operator's interrupt propagates into the child through the shared signal,
+    and the parent's own ceiling still applies to the turn that spawned it."""
 
     async def call(self, args: TaskArgs, ctx: ToolContext) -> ToolResult:
         runner = getattr(ctx, "subagents", None)

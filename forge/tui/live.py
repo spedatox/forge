@@ -96,6 +96,7 @@ class LiveRegion:
         self._overflowed = 0            # rows suppressed by the cap, last frame
         self._task: asyncio.Task | None = None
         self._paused = False
+        self._composer = None           # set by attach_composer, when a person is present
 
     # ── the Spinner surface, forwarded ───────────────────────────────────────
 
@@ -231,9 +232,30 @@ class LiveRegion:
                              max(20, ansi.terminal_width() - 1))
         return ansi.paint(body, "dim")
 
+    def attach_composer(self, composer) -> None:
+        """Let the operator's input line ride in this region.
+
+        The region is the only thing allowed to write to the bottom of the
+        screen while a turn runs, so the composer does not draw itself — it
+        hands over a line and this frame includes it. That is what keeps the
+        no-scroll invariant intact with a second thing on screen: there is still
+        exactly one writer, and it still reclaims exactly what it drew."""
+        self._composer = composer
+
     def render(self) -> list[str]:
-        """Header plus body, as the lines that will be written."""
-        return [self.spinner.render(), *self.rows()]
+        """Header plus body plus the composer, as the lines to be written.
+
+        The composer goes LAST, under the in-flight rows. It is where a prompt
+        belongs — the bottom of the screen — and it means a batch growing or
+        shrinking above it does not make the input line jump around under the
+        operator's hands while they are typing into it."""
+        lines = [self.spinner.render(), *self.rows()]
+        composer = getattr(self, "_composer", None)
+        if composer is not None:
+            line = composer.line()
+            if line:
+                lines.append(line)
+        return lines
 
     def _draw(self) -> None:
         """Paint one frame over the last, in a single write.

@@ -407,6 +407,18 @@ class InputBar:
             # to save a filtered history walk.
             multiline=False,                  # esc+enter inserts; enter submits
             mouse_support=False,              # keep native terminal selection
+            # ctrl+x ctrl+e opens $EDITOR on the current line and takes back
+            # whatever is saved. Codex ships this as `external_editor.rs`; here
+            # prompt_toolkit already had it behind a flag nobody had set.
+            #
+            # It earns its place on long input, which is exactly where a
+            # one-line editor is worst: a paragraph of context, a stack trace,
+            # a spec. Without it the options are typing prose into a field with
+            # no wrapping and no undo, or writing a file and asking the agent to
+            # read it — and the second is what people actually did, which means
+            # a round trip and a tool call to say something they had already
+            # written.
+            enable_open_in_editor=True,
         )
 
     def _build_session_vt100(self):
@@ -467,7 +479,7 @@ class InputBar:
 
     # ── reading ──────────────────────────────────────────────────────────────
 
-    async def read(self, prompt_ansi: str) -> Submission:
+    async def read(self, prompt_ansi: str, prefill: str = "") -> Submission:
         """One submission. Ctrl-D ends the session; so does ctrl-C twice.
 
         The docstring here used to claim ctrl-C at an empty line ended the
@@ -475,12 +487,19 @@ class InputBar:
         redrew, so the only exit was ctrl-D and the only way to find it was to
         already know. Now the reflex works, with a confirmation, because the
         same keystroke is how people abandon a half-typed line.
+
+        `prefill` seeds the line editor with text the operator already typed —
+        today, whatever they wrote during the last turn that no loop boundary
+        got to. It arrives editable rather than submitted: the moment it was
+        aimed at has passed, so they should see it in the new context and decide
+        whether it still says what they meant.
         """
         if self._session is None:
-            return await self._read_plain(prompt_ansi)
+            return await self._read_plain(prompt_ansi, prefill)
         try:
             with patch_stdout(raw=True):
-                line = await self._session.prompt_async(ANSI(prompt_ansi))
+                line = await self._session.prompt_async(ANSI(prompt_ansi),
+                                                        default=prefill)
         except EOFError:
             return Submission("eof", "")
         except KeyboardInterrupt:
@@ -507,9 +526,16 @@ class InputBar:
         print("  press ctrl-c again to exit, or ctrl-d", flush=True)
         return False
 
-    async def _read_plain(self, prompt_ansi: str) -> Submission:
+    async def _read_plain(self, prompt_ansi: str, prefill: str = "") -> Submission:
         import asyncio
 
+        # `input()` cannot seed an editable line, so carried text is shown above
+        # the prompt for the operator to copy or retype. Worse than the
+        # prompt_toolkit path and better than dropping it — this branch is the
+        # degraded terminal, where every affordance is already hand-made.
+        if prefill:
+            from forge.tui import ansi as _ansi
+            _ansi.write(_ansi.paint(f"  ┆ carried over: {prefill}", "cyan"))
         try:
             line = await asyncio.to_thread(input, prompt_ansi)
         except (EOFError, KeyboardInterrupt):

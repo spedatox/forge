@@ -1,0 +1,8 @@
+# Shell scripts must keep LF even when checked out on Windows: a CRLF in
+# install.sh makes the `#!/usr/bin/env sh` line unrunnable under WSL and any
+# Unix host the clone is copied to, with an error that names no cause.
+*.sh text eol=lf
+
+# The PowerShell installer carries a UTF-8 BOM on purpose — Windows PowerShell
+# 5.1 reads a BOM-less script as ANSI and mis-parses its box-drawing comments.
+*.ps1 -text

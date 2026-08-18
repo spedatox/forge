@@ -7,6 +7,11 @@ dependencies = [
     "pydantic>=2.6",
     "websockets>=12.0",
     "anthropic>=0.40",
+    # Imported directly by the web tools, the notifier and the H.İ.S.A.R.
+    # client. It arrives anyway underneath anthropic, so this adds nothing to
+    # the install — it says out loud that the Forge uses it, so a future
+    # anthropic that drops it does not silently take three tools with it.
+    "httpx>=0.27",
 ]
 
 [project.optional-dependencies]
@@ -30,6 +35,9 @@ providers = ["openai>=1.40"]
 # plain input() when this is absent.
 tui = ["prompt_toolkit>=3.0", "rich>=13.0"]
 dev = ["pytest>=8.0", "prompt_toolkit>=3.0", "rich>=13.0"]
+# What a person installing on their own machine wants, spelled once so the
+# install line does not have to enumerate it: `pip install -e ".[all]"`.
+all = ["forge[tui,providers,graph]"]
 
 [project.scripts]
 forge = "forge.__main__:main"

@@ -5,6 +5,10 @@ from __future__ import annotations
 import abc
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
+
+OnOutput = Callable[[str, str], None]
+"""(stream, text) as a command produces it. "stdout" or "stderr"."""
 
 
 @dataclass(frozen=True)
@@ -26,6 +30,21 @@ class CellPolicy:
     pids_limit: int = 256              # fork-bomb guard (DockerCell --pids-limit)
     default_timeout_s: int = 60        # per-command wall clock when a call omits one
     max_timeout_s: int = 600           # hard ceiling a per-command timeout cannot exceed
+
+    kill_on_timeout: bool = True
+    """Whether the wall clock above ENDS a command or merely reports on it.
+
+    True is the headless posture and the default, because a dispatched job has
+    nobody watching it: a command that never returns would park the loop
+    forever, and the only correct answer when no operator exists is to stop it.
+
+    False is the interactive posture. The timeout becomes a repeating notice,
+    the command keeps running, and ctrl+c is what ends it — which is what an
+    operator watching a long build actually wants, because the alternative is
+    losing four minutes of work to a limit they would have waived. It is only
+    safe in company: it requires both live output (so the wait is informed) and
+    a working interrupt (so the decision can be acted on). Setting it without
+    either is how a harness hangs with a straight face."""
     max_output_bytes: int = 100_000    # cap returned stdout+stderr so a runaway can't flood
     # ── Lab posture ────────────────────────────────────────────────────────────
     # Off by default: every Cell is non-root with ALL Linux capabilities dropped.
@@ -93,8 +112,19 @@ class Cell(abc.ABC):
 
     @abc.abstractmethod
     async def run(self, command: str, timeout: int | None = None,
-                  env: dict[str, str] | None = None) -> CommandResult:
-        """Execute a shell command inside the Cell and return its result."""
+                  env: dict[str, str] | None = None,
+                  on_output: "OnOutput | None" = None) -> CommandResult:
+        """Execute a shell command inside the Cell and return its result.
+
+        `on_output` is called with ("stdout" | "stderr", text) as the command
+        produces it, for an operator watching. It is a courtesy channel, not the
+        result: the returned `CommandResult` is still the whole truth, and a
+        backend that cannot stream may simply never call it. Nothing that
+        depends on correctness may read from it.
+
+        The callback is invoked from the event loop and must not block or raise.
+        A raising callback is swallowed by the backend — output rendering is
+        never allowed to fail a command."""
 
     @abc.abstractmethod
     async def write(self, path: str, content: str) -> None:
@@ -117,7 +147,22 @@ class Cell(abc.ABC):
         return max(1, min(t, self.policy.max_timeout_s))
 
     def _cap(self, text: str) -> str:
+        """Bound one stream, keeping head AND tail.
+
+        Head-only truncation here silently defeated the head+tail preview in
+        `warden/results.py`: this cap runs first, at the Cell boundary, so on
+        any command whose output exceeds `max_output_bytes` the tail was already
+        gone before the layer that exists to preserve it ever saw the text. That
+        is the exact case both layers name as the one that matters — a failing
+        build or test run puts the answer at the END, after the noise.
+
+        The middle is what goes, and the omission is stated where it happened so
+        the model can tell "this output was cut" from "this output ended"."""
         limit = self.policy.max_output_bytes
         if len(text) <= limit:
             return text
-        return text[:limit] + f"\n…[truncated {len(text) - limit} bytes]"
+        half = limit // 2
+        omitted = len(text) - 2 * half
+        return (f"{text[:half]}\n"
+                f"…[{omitted} bytes omitted from the middle of this stream]…\n"
+                f"{text[-half:]}")

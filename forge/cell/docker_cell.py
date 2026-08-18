@@ -23,6 +23,7 @@ import uuid
 from pathlib import Path
 
 from forge.cell.base import Cell, CellPolicy, CommandResult
+from forge.cell.stream import REAP_GRACE_S as _REAP_GRACE_S, Retained as _Retained, drain as _drain
 
 WORKDIR = "/workspace"
 # The Cell's default uid — non-root. A JOB can never change this; only an
@@ -77,20 +78,49 @@ class DockerCell(Cell):
         return self.workspace_mount
 
     async def _docker(self, *args: str, timeout: int | None = None,
-                      stdin: bytes | None = None) -> tuple[int, bytes, bytes]:
+                      stdin: bytes | None = None,
+                      on_output=None) -> tuple[int, bytes, bytes]:
         proc = await asyncio.create_subprocess_exec(
             "docker", *args,
             stdin=asyncio.subprocess.PIPE if stdin is not None else None,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
+        if stdin is not None:
+            # `write` pushes file content down stdin, and the streaming path
+            # does not carry a writer. Nothing that takes stdin is a command an
+            # operator watches, so there is nothing to stream for it either.
+            try:
+                out, err = await asyncio.wait_for(
+                    proc.communicate(input=stdin), timeout=timeout)
+            except (asyncio.TimeoutError, TimeoutError):
+                proc.kill()
+                await proc.wait()
+                return 124, b"", b"docker call timed out"
+            return proc.returncode if proc.returncode is not None else 1, out, err
+
+        # Streamed, and for the same reason SubprocessCell is: output collected
+        # by `communicate()` is lost when the deadline cancels it, and the whole
+        # point of watching a build is seeing it before it ends.
+        out_buf = _Retained(self.policy.max_output_bytes)
+        err_buf = _Retained(self.policy.max_output_bytes)
+        drain = asyncio.gather(_drain(proc.stdout, out_buf, "stdout", on_output),
+                               _drain(proc.stderr, err_buf, "stderr", on_output))
         try:
-            out, err = await asyncio.wait_for(proc.communicate(input=stdin), timeout=timeout)
-        except asyncio.TimeoutError:
+            if timeout is None:
+                await drain
+            else:
+                await asyncio.wait_for(drain, timeout=timeout)
+            await asyncio.wait_for(proc.wait(), timeout=_REAP_GRACE_S)
+        except (asyncio.TimeoutError, TimeoutError):
             proc.kill()
-            await proc.wait()
-            return 124, b"", b"docker call timed out"
-        return proc.returncode if proc.returncode is not None else 1, out, err
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=_REAP_GRACE_S)
+            except (asyncio.TimeoutError, TimeoutError, ProcessLookupError):
+                pass
+            return 124, out_buf.raw(), err_buf.raw() + b"\ndocker call timed out"
+        code = proc.returncode if proc.returncode is not None else 1
+        return code, out_buf.raw(), err_buf.raw()
 
     async def start(self) -> None:
         if self._started:
@@ -177,7 +207,8 @@ class DockerCell(Cell):
             return                               # unprivileged: start() will report it
 
     async def run(self, command: str, timeout: int | None = None,
-                  env: dict[str, str] | None = None) -> CommandResult:
+                  env: dict[str, str] | None = None,
+                  on_output=None) -> CommandResult:
         if not self._started:
             await self.start()
         t = self._clamp_timeout(timeout)
@@ -196,13 +227,21 @@ class DockerCell(Cell):
         # from outside. Only when the image has `timeout`: a container without
         # coreutils would answer `sh: timeout: not found` to everything, and a
         # missing convenience must never break every command.
-        if self._can_timeout:
+        # `kill_on_timeout` decides whether the container-side kill is armed at
+        # all. Cleared, the operator is the stopping condition and arming it
+        # here would override them from inside the container, where ctrl+c
+        # cannot reach — the one place the decision must NOT be made.
+        if self._can_timeout and self.policy.kill_on_timeout:
             command = f"timeout -s KILL {t} sh -c {shlex.quote(command)}"
         exec_args += [self.container, "sh", "-c", command]
         # The outer deadline is deliberately slack: the container-side kill is
         # the one that should fire, and this is the backstop for a `docker exec`
-        # that hangs in the daemon rather than in the command.
-        code, out, err = await self._docker(*exec_args, timeout=t + _EXEC_GRACE_S)
+        # that hangs in the daemon rather than in the command. Without a kill
+        # policy there is no outer deadline either; the command runs until it
+        # ends or the operator stops it.
+        outer = t + _EXEC_GRACE_S if self.policy.kill_on_timeout else None
+        code, out, err = await self._docker(*exec_args, timeout=outer,
+                                            on_output=on_output)
         timed_out = code == 124
         return CommandResult(
             self._cap(out.decode("utf-8", "replace")),

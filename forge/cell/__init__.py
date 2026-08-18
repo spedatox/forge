@@ -1,6 +1,6 @@
 """The Cell — one isolated execution sandbox per agent (§8, §9.1).
 
-    Cell.run(command, timeout, env) -> CommandResult{stdout, stderr, exit_code}
+    Cell.run(command, timeout, env, on_output) -> CommandResult{stdout, stderr, exit_code}
     Cell.write(path, content)
     Cell.read(path)
     Cell.reset()

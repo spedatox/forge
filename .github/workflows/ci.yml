@@ -57,6 +57,45 @@ jobs:
         run: |
           python -m forge demo
 
+  # The install scripts are the first thing anyone runs on a new machine and
+  # the last thing anyone tests, so they rot silently and the failure lands on
+  # a person who has no way to tell a broken script from a broken machine.
+  # Both are exercised from a clean checkout, on the two platforms they target.
+  installer:
+    name: Install script (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # A venv inside a venv is not what the runner needs, and the point is the
+      # script's own verification step: it ends by listing the agents, so a
+      # broken install fails here with the reason attached.
+      - name: ./install.sh
+        if: runner.os != 'Windows'
+        run: ./install.sh --no-venv --extras dev
+
+      # `powershell`, not `pwsh`: 5.1 is what ships on Windows, it is what a
+      # person gets when they open a terminal, and it is the stricter parser —
+      # it reads a BOM-less script as ANSI and chokes on its own comments.
+      - name: .\install.ps1
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: .\install.ps1 -NoVenv -Extras dev
+
+      - name: The installed Forge runs a real turn
+        run: python -m forge demo
+
   deploy:
     name: Deploy to the execution host
     needs: test                       # never deploy a red build

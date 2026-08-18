@@ -311,6 +311,7 @@ class ForgePeer:
                                  tool_providers=self.extensions.tool_providers(),
                                  fragments=self.extensions.fragments,
                                  hooks=self.extensions.hooks,
+                                 bus=self.extensions.bus,
                                  oracle=self._oracle, allowlist=self.allowlist,
                                  memory=self._memory)
             status = "ok" if term.reason is StopReason.COMPLETED else "error"
@@ -363,6 +364,7 @@ class ForgePeer:
                                  tool_providers=self.extensions.tool_providers(),
                                  fragments=self.extensions.fragments,
                                  hooks=self.extensions.hooks,
+                                 bus=self.extensions.bus,
                                  oracle=self._oracle, allowlist=self.allowlist,
                                  # Labelled with the chat so Mark VI knows whose
                                  # turn is writing; the peer runs several

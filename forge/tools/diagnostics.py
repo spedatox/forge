@@ -25,7 +25,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-from forge.warden.tool import Tool, ToolContext, ToolResult
+from forge.warden.tool import Tool, ToolContext, ToolResult, cell_backed_timeout
 
 # Enough to see the shape of the problem; past this the agent should fix some
 # and look again, not read a wall.
@@ -57,6 +57,17 @@ class Diagnostics(Tool):
     READ_ONLY = True
     CONCURRENCY_SAFE = True
     DESTRUCTIVE = False
+
+    def timeout_s(self, args: DiagnosticsArgs, ctx: ToolContext) -> float:
+        """Sized for the whole fallback chain, not one checker.
+
+        `_run_checker` tries each route in `_CHECKERS` until one answers, and
+        each is a Cell command inheriting the profile's own wall clock. A
+        workspace with no checker installed therefore pays that budget once per
+        route — on Centurion, several times 300s — so a backstop sized for a
+        single run would cancel this tool midway through behaving exactly as
+        designed, and report it as a hang."""
+        return cell_backed_timeout(ctx, runs=len(_CHECKERS))
 
     async def _run_checker(self, cell, rel: str) -> tuple[str | None, str]:
         """(payload, stderr). payload is None when no checker could be reached.

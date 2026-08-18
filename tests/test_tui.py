@@ -546,3 +546,84 @@ def test_an_empty_message_draws_nothing():
     finally:
         ansi._ENABLED = False
         ui.reset()
+
+
+# ── wide characters: the layout's factor-of-two bug ──────────────────────────
+def test_a_wide_character_counts_as_two_columns():
+    """`len` counts characters and terminals draw columns. For CJK and emoji the
+    two disagree by a factor of two, and every aligned row measured with `len`
+    lands in a different place on rows containing them."""
+    assert ansi.visible_width("abc") == 3
+    assert ansi.visible_width("日本語") == 6
+    assert ansi.visible_width("a日b") == 4
+
+
+def test_a_combining_mark_takes_no_column():
+    """It prints on top of the character before it."""
+    assert ansi.visible_width("e\u0301") == 1        # e + combining acute
+
+
+def test_colour_codes_still_measure_as_zero():
+    assert ansi.visible_width(ansi.paint("abc", "red")) == 3
+
+
+def test_truncate_bounds_columns_not_characters():
+    """The damaging direction. A row bounded to the terminal width by CHARACTER
+    count prints at up to twice that and wraps — and a wrapped row inside the
+    live region breaks the no-scroll invariant: `repaint` reclaims the rows it
+    believes it drew and leaks the extra one every frame."""
+    cut = ansi.truncate("日本語日本語日本語", 10)
+    assert ansi.visible_width(cut) <= 10
+
+
+def test_truncate_never_splits_a_wide_character():
+    """Half a character is not a character; a terminal handed one draws a box."""
+    for limit in range(2, 12):
+        cut = ansi.truncate("日本語日本語", limit)
+        assert ansi.visible_width(cut) <= limit, f"overflowed at limit={limit}"
+
+
+def test_wrapped_height_sees_a_cjk_line_as_two_rows():
+    """The consequence that matters: this is what `repaint` rewinds by."""
+    assert ansi.wrapped_height("日" * 40, width=40) == 2
+
+
+# ── one colour decision, not two ─────────────────────────────────────────────
+def test_no_color_still_silences_the_console(monkeypatch):
+    """The operator's preference must survive the plumbing.
+
+    `ui.console()` now passes `no_color` explicitly so Rich stops reading
+    NO_COLOR on its own account. That is only correct because `ansi.enable()`
+    reads it FIRST — this pins the second half of that, so a later edit cannot
+    quietly turn colour back on for someone who asked for none."""
+    from forge.tui import ui as _ui
+
+    monkeypatch.setenv("NO_COLOR", "1")
+    ansi._ENABLED = False
+    _ui.reset()
+    try:
+        assert ansi.enable() is False, "NO_COLOR no longer disables colour"
+        _ui.reset()
+        c = _ui.console()
+        assert c is None or c.no_color, "Rich kept colour after NO_COLOR"
+    finally:
+        ansi._ENABLED = False
+        _ui.reset()
+
+
+def test_ansi_is_the_one_that_decides(monkeypatch):
+    """When ansi says colour is on, Rich must not second-guess it — the two
+    reading the environment separately is what left painted harness lines next
+    to unpainted components."""
+    from forge.tui import ui as _ui
+
+    monkeypatch.setenv("NO_COLOR", "1")     # Rich would honour this on its own
+    ansi._ENABLED = True                    # ansi has already decided otherwise
+    _ui.reset()
+    try:
+        c = _ui.console()
+        if c is not None:
+            assert not c.no_color, "Rich overrode ansi's decision"
+    finally:
+        ansi._ENABLED = False
+        _ui.reset()

@@ -105,9 +105,17 @@ def console() -> Any:
         # same colour as the terminal and simply is not there. ansi.enable()
         # has already switched virtual-terminal processing on, which is what
         # makes 256 available — Rich has no way to know that happened.
+        # `no_color` completes the same rule. Rich reads NO_COLOR itself, and
+        # that read is independent of ansi's — so the two could still disagree
+        # after everything above had been settled, which is the exact failure
+        # the paragraph above says it fixed. ansi.enable() ALREADY honours
+        # NO_COLOR, so passing False here does not override the operator: it
+        # routes their preference through the one place that decides, instead
+        # of having it applied twice by two components that can drift apart.
         _console = Console(theme=Theme(_THEME), soft_wrap=False,
                            highlight=False, safe_box=False,
                            color_system="256" if ansi._ENABLED else None,  # noqa: SLF001
+                           no_color=not ansi._ENABLED,                     # noqa: SLF001
                            force_terminal=True if ansi._ENABLED else None)  # noqa: SLF001
     return _console
 
@@ -403,6 +411,51 @@ def live_row(label: str, target: str, elapsed: float, *, last: bool = False,
         body.append(f"({target})" if not subagent else f"  {target}",
                     style="forge.faint")
     grid.add_row(connector, body, Text(stamp, style="forge.faint"))
+    return render(grid)
+
+
+def composer_line(draft: str, note: str, *, queued: int = 0) -> str:
+    """The mid-turn input row.
+
+        ┆ also update the README▏                              ⏎ send
+        ┆ 1 queued — it will be picked up at the next step
+
+    A different connector from the `├─`/`└─` tree above it, because it is not
+    part of the tree: those rows are things the agent is doing and this is the
+    one row that belongs to the person. `┆` reads as a margin rather than a
+    branch, which is the distinction being drawn.
+
+    Colour is the exception to the region's grey rule. Everything else there is
+    structure that has not happened yet; this is live text the operator is
+    typing, and it has to be findable at a glance in a region that is otherwise
+    deliberately quiet. The cursor bar is drawn rather than real — the terminal's
+    own cursor is parked wherever the last write left it, and moving it into the
+    region would fight the repaint.
+    """
+    c = console()
+    if c is None:
+        return ""
+    width = max(30, c.width)
+    # Only while there is something to send. The idle row already says how many
+    # are queued in its own text, and repeating it in the right-hand column
+    # reads as two different counts that happen to agree.
+    hint = "⏎ send" if draft else ""
+
+    grid = Table.grid(padding=(0, 0))
+    grid.add_column(width=4, no_wrap=True)                    # "  ┆ "
+    grid.add_column(overflow="ellipsis", ratio=1)
+    grid.add_column(width=len(hint) + 2 if hint else 0,
+                    justify="right", no_wrap=True)
+    grid.width = width
+
+    body = Text()
+    if draft:
+        body.append(draft, style="forge.fg")
+        body.append("▏", style="forge.accent")
+    else:
+        body.append(note, style="forge.faint")
+    grid.add_row(Text("  ┆ ", style="forge.accent"), body,
+                 Text(hint, style="forge.faint") if hint else Text(""))
     return render(grid)
 
 

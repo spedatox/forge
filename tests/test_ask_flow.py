@@ -32,7 +32,7 @@ class Recording:
 class FakeCell:
     host_path = None
 
-    async def run(self, command, timeout=None, env=None):
+    async def run(self, command, timeout=None, env=None, on_output=None):
         from forge.cell.base import CommandResult
         return CommandResult(stdout="pushed", stderr="", exit_code=0)
 

@@ -112,6 +112,105 @@ def test_a_command_that_finishes_is_untouched():
     assert result.timed_out is False
 
 
+def test_a_timed_out_command_still_reports_what_it_printed():
+    """A timeout that discards the output is a diagnosable hang turned into a
+    guess. The output before the wedge is the whole diagnosis: a hanging pytest
+    names the test it stopped on, a hanging build names the file.
+
+    DockerCell never lost it — `timeout -s KILL` fires inside the container, so
+    `docker exec` returns normally with the output — so the two backends
+    disagreed about what a timeout tells you, which is the kind of difference
+    that gets debugged twice."""
+    async def scenario():
+        cell = _cell(Path(tempfile.mkdtemp()))
+        await cell.start()
+        return await cell.run("echo before-the-hang; sleep 30", timeout=2)
+
+    result = asyncio.run(asyncio.wait_for(scenario(), timeout=30))
+
+    assert result.timed_out is True
+    assert result.exit_code == 124
+    assert "before-the-hang" in result.stdout, "the output before the wedge was dropped"
+    assert "timed out" in result.stderr
+
+
+def test_a_runaway_writer_cannot_grow_the_buffer_without_bound():
+    """Draining into a buffer reintroduces the growth `max_output_bytes` exists
+    to stop — and worse than before, because it now accumulates for as long as
+    the timeout allows rather than being capped by a finished result."""
+    async def scenario():
+        cell = SubprocessCell(Path(tempfile.mkdtemp()),
+                              CellPolicy(default_timeout_s=1, max_output_bytes=4_000))
+        await cell.start()
+        # A shell builtin loop rather than `yes`, so the test does not depend on
+        # which coreutils the platform's bash shipped with.
+        return await cell.run("while :; do echo abcdefghijklmnop; done", timeout=1)
+
+    result = asyncio.run(asyncio.wait_for(scenario(), timeout=30))
+
+    assert len(result.stdout) < 8_000, "the retained buffer is not bounded"
+    assert "omitted from the middle" in result.stdout
+
+
+def test_a_killed_command_tells_the_model_the_limit_is_raisable():
+    """The reported symptom: "I keep hitting the 300s timeout and the turn ends
+    like it gets confused".
+
+    Centurion's profile sets the Cell to 300s, so a full suite or a wide scan is
+    killed mid-run. The model was handed `exit_code: 124` and one line saying so
+    — nothing about what the limit was, and nothing about the `timeout` argument
+    that would have raised it to the ceiling. With no lever visible, the only
+    moves left are re-run the identical command into the identical wall, or stop
+    and report the work blocked. Both look like confusion from outside; neither
+    is."""
+    from forge.tools.shell import RunCommand, RunCommandArgs
+    from forge.warden.filestate import FileStateCache
+    from forge.warden.permissions import PermissionEngine
+    from forge.warden.tool import ToolContext
+
+    async def scenario():
+        tmp = Path(tempfile.mkdtemp())
+        cell = SubprocessCell(tmp, CellPolicy(default_timeout_s=1))
+        await cell.start()
+        ctx = ToolContext(agent_id="t", cell=cell, graph=None,
+                          files=FileStateCache(), permissions=PermissionEngine(),
+                          network_allowed=False)
+        return await RunCommand().call(
+            RunCommandArgs(command="echo starting; sleep 30", timeout=1), ctx)
+
+    res = asyncio.run(asyncio.wait_for(scenario(), timeout=30))
+
+    assert res.is_error
+    assert "starting" in res.content, "the output before the wall was dropped"
+    assert "The limit was 1s" in res.content, "the model was not told the budget"
+    assert "pass `timeout` up to 600" in res.content, "the lever was not named"
+
+
+def test_at_the_ceiling_the_advice_stops_offering_more_time():
+    """Advice that says "ask for longer" when longer is not available sends the
+    model round the same loop with a bigger number. At the ceiling the honest
+    answer is to split the work."""
+    from forge.tools.shell import RunCommand, RunCommandArgs
+    from forge.warden.filestate import FileStateCache
+    from forge.warden.permissions import PermissionEngine
+    from forge.warden.tool import ToolContext
+
+    async def scenario():
+        tmp = Path(tempfile.mkdtemp())
+        cell = SubprocessCell(tmp, CellPolicy(default_timeout_s=1, max_timeout_s=1))
+        await cell.start()
+        ctx = ToolContext(agent_id="t", cell=cell, graph=None,
+                          files=FileStateCache(), permissions=PermissionEngine(),
+                          network_allowed=False)
+        return await RunCommand().call(
+            RunCommandArgs(command="sleep 30", timeout=1), ctx)
+
+    res = asyncio.run(asyncio.wait_for(scenario(), timeout=30))
+
+    assert "a longer timeout is not available" in res.content.replace("\n", " ")
+    assert "Split the work" in res.content
+
+
 def test_the_command_runs_in_a_group_of_its_own():
     """The kill needs a handle that survives the shell exiting first, and a
     process group is the only one there is. Set at launch because by the time

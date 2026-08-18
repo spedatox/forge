@@ -34,7 +34,7 @@ class _Cell:
         self.subpath = subpath
         self.ran: list[str] = []
 
-    async def run(self, command, timeout=None, env=None):
+    async def run(self, command, timeout=None, env=None, on_output=None):
         self.ran.append(command)
         for prefix, result in self.answers.items():
             if command.startswith(prefix):
@@ -136,7 +136,7 @@ def test_a_git_command_without_a_cell_does_not_raise(tmp_path):
 
 def test_a_cell_that_throws_does_not_end_the_session(tmp_path):
     class _Broken(_Cell):
-        async def run(self, command, timeout=None, env=None):
+        async def run(self, command, timeout=None, env=None, on_output=None):
             raise RuntimeError("docker is not running")
 
     out = _run("status", "", _Session(tmp_path, _Broken()))

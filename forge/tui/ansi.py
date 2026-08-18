@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import re
+import unicodedata
 import sys
 
 _ENABLED = False
@@ -40,6 +41,12 @@ GLYPHS = {
     # The permission selector's cursor. ">" rather than "*" because the row it
     # marks is a choice being pointed at, not an item in a list.
     "❯": ">",
+    # The composer's margin and its drawn cursor. `:` rather than `|` for the
+    # margin so the operator's row is distinguishable from the `│` the tool
+    # tree already uses on the fallback path — the whole point of the glyph is
+    # that this line is theirs and not the agent's. The cursor bar degrades to
+    # `_`, which is what a cursor looks like when it cannot be a block.
+    "┆": ":", "▏": "_",
 }
 
 
@@ -122,13 +129,49 @@ one payload now, and a tally that counts only the newlines sees a leak that
 is not there."""
 
 
-def visible_width(text: str) -> int:
-    """How wide a styled string actually prints.
+def char_width(ch: str) -> int:
+    """Terminal columns one character occupies: 0, 1 or 2.
 
-    Colour codes are zero-width but count in `len`, so any layout that measures
-    a painted string puts its column somewhere different on every row. Anything
-    aligning two columns has to measure with this instead."""
-    return len(_ESCAPE.sub("", text))
+    `len()` counts characters and terminals draw columns, and for CJK, emoji,
+    and anything else East Asian Wide the two disagree by a factor of two. A
+    combining mark is worse — it prints on top of the character before it and
+    takes no column at all.
+
+    Approximated from `unicodedata` rather than carrying a table. It is right
+    for the CJK ranges, right for combining marks, and imperfect for a handful
+    of newer emoji whose width the standard itself reports inconsistently.
+    Being occasionally one column out is a cosmetic flaw; being a factor of two
+    out on a whole script is the layout collapsing, and that is the case this
+    exists to stop.
+    """
+    if unicodedata.combining(ch):
+        return 0
+    # Written as escapes, not literals. An invisible character in source is a
+    # hazard on its own, and `test_every_glyph_the_tui_emits_has_a_fallback`
+    # reads string literals — it would see these as glyphs being DRAWN and ask
+    # for an ASCII fallback for something that has no appearance at all.
+    if ord(ch) in (0x200B, 0xFEFF):          # zero-width space / BOM
+        return 0
+    return 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+
+
+def visible_width(text: str) -> int:
+    """How many columns a styled string actually occupies.
+
+    Two ways `len` lies about this, and both were live:
+
+    Colour codes are zero-width but count in `len`, so any layout measuring a
+    painted string puts its column somewhere different on every row.
+
+    Wide characters are the other direction and the more damaging one. A CJK
+    filename in a tool row counted as N and printed as 2N, so a row bounded to
+    the terminal width WRAPPED — and a wrapped row inside the live region is
+    not a cosmetic problem, it is the no-scroll invariant broken: `repaint`
+    reclaims the rows it believes it drew, leaves the extra one behind, and
+    leaks a line per frame until the conversation is buried. That is why this
+    is measured here rather than in the callers.
+    """
+    return sum(char_width(ch) for ch in _ESCAPE.sub("", text))
 
 
 def styled() -> bool:
@@ -304,9 +347,25 @@ def terminal_width(default: int = 80) -> int:
 
 
 def truncate(text: str, limit: int) -> str:
-    """One line, bounded. Newlines become '⏎' so a multi-line command still
-    reads as one row rather than silently wrapping the layout."""
+    """One line, bounded to `limit` COLUMNS. Newlines become '⏎' so a multi-line
+    command still reads as one row rather than silently wrapping the layout.
+
+    Measured in columns rather than characters for the reason `visible_width`
+    gives: a line of CJK cut at `limit` characters prints at up to twice that
+    and wraps, which is the failure this function exists to prevent. Cutting is
+    done by accumulating width so a wide character is never split across the
+    boundary — half a character is not a character, and a terminal handed one
+    draws a replacement box.
+    """
     flat = text.replace("\n", " ⏎ ").strip()
-    if len(flat) <= limit:
+    if visible_width(flat) <= limit:
         return flat
-    return flat[: max(0, limit - 1)] + "…"
+    room = max(0, limit - 1)                # the ellipsis takes one column
+    out, used = [], 0
+    for ch in flat:
+        w = char_width(ch)
+        if used + w > room:
+            break
+        out.append(ch)
+        used += w
+    return "".join(out) + "…"

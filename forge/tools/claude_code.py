@@ -22,7 +22,8 @@ import uuid
 
 from pydantic import BaseModel, Field
 
-from forge.warden.tool import Tool, ToolContext, ToolResult
+
+from forge.warden.tool import BACKSTOP_GRACE_S, Tool, ToolContext, ToolResult
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +103,12 @@ class ClaudeCode(Tool):
     READ_ONLY = False
     CONCURRENCY_SAFE = False
     DESTRUCTIVE = False
+
+    TIMEOUT_S = FCC_TIMEOUT_S + BACKSTOP_GRACE_S
+    """Above this tool's own `FCC_TIMEOUT_S`, for the reason `run_command`
+    states at length: the inner timeout is the one that should fire, because it
+    is the one that stops the process and names the real cause. Derived rather
+    than written out, so raising the ceiling cannot silently invert the two."""
 
     async def call(self, args: ClaudeCodeArgs, ctx: ToolContext) -> ToolResult:
         # ── Guard: is fcc-claude reachable? ───────────────────────────────

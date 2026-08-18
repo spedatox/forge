@@ -64,19 +64,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(_with_default_command(
         list(argv) if argv is not None else sys.argv[1:]))
     # Local convenience: a .env beside the repo is how an operator keeps keys
-    # out of their shell profile. Real environment variables still win.
-    #
-    # Two files, most specific first, because load_dotenv never overwrites a
-    # name that is already set. So the precedence is: real environment > this
-    # project's .env > the user's own. The user-level file is what makes a
-    # global install usable — `forge` run in some repo that has never heard of
-    # it still finds the operator's keys, instead of needing a .env copied into
-    # every project they open.
-    from pathlib import Path as _Path
-
-    from forge.config import load_dotenv
-    load_dotenv()
-    load_dotenv(_Path(os.environ.get("FORGE_HOME") or (_Path.home() / ".forge")) / ".env")
+    # out of their shell profile. Real environment variables still win. Both
+    # files and the precedence between them live in `config.load_env_files`,
+    # because `/model refresh` reloads them too and the two must not drift.
+    from forge.config import load_env_files
+    load_env_files()
     logging.basicConfig(level=os.environ.get("FORGE_LOG_LEVEL", "INFO"),
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 

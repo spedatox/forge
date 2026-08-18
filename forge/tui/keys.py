@@ -55,7 +55,22 @@ def available() -> bool:
         return False
 
 
-def read_key(timeout: float | None = None) -> str | None:
+def read_key_raw(timeout: float | None = None) -> str | None:
+    """`read_key`, but with the character exactly as typed.
+
+    The lowercasing in `read_key` is right for a permission prompt, where `Y`
+    and `y` are the same answer and treating them differently would be a bug.
+    It is wrong for anything the operator is composing prose in, where it
+    silently makes capitals impossible to type — so the composer takes this door
+    instead of the caller having to remember to un-lowercase, which is not
+    something a caller can do (`y` and `Y` are the same string by then).
+
+    Backspace is passed through rather than named, because the one caller that
+    wants it already knows both bytes and no other caller wants it at all."""
+    return read_key(timeout, lower=False)
+
+
+def read_key(timeout: float | None = None, *, lower: bool = True) -> str | None:
     """One keypress as a name, a single character, NOTHING, or None.
 
     Returns UP/DOWN/ENTER/CANCEL for the navigation keys, otherwise the
@@ -80,8 +95,8 @@ def read_key(timeout: float | None = None) -> str | None:
         return None
     try:
         if sys.platform == "win32":
-            return _read_win(timeout)
-        return _read_posix(timeout)
+            return _read_win(timeout, lower=lower)
+        return _read_posix(timeout, lower=lower)
     except Exception:  # noqa: BLE001 — an unreadable key is a fallback, not a crash
         return None
 
@@ -102,7 +117,7 @@ def _wait_win(timeout: float | None) -> bool:
     return True
 
 
-def _read_win(timeout: float | None = None) -> str | None:
+def _read_win(timeout: float | None = None, *, lower: bool = True) -> str | None:
     import msvcrt
 
     if not _wait_win(timeout):
@@ -119,10 +134,10 @@ def _read_win(timeout: float | None = None) -> str | None:
         return ENTER
     if ch in ("\x03", "\x1b"):        # ctrl-c, escape
         return CANCEL
-    return ch.lower()
+    return ch.lower() if lower else ch
 
 
-def _read_posix(timeout: float | None = None) -> str | None:
+def _read_posix(timeout: float | None = None, *, lower: bool = True) -> str | None:
     import select
     import termios
     import tty
@@ -151,6 +166,6 @@ def _read_posix(timeout: float | None = None) -> str | None:
             return ENTER
         if ch == "\x03":
             return CANCEL
-        return ch.lower()
+        return ch.lower() if lower else ch
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, saved)

@@ -179,3 +179,22 @@ def test_a_single_monstrous_line_is_cut_rather_than_refused(ctx, tmp_path):
     res = asyncio.run(ReadFile().call(ReadFileArgs(path="min.js"), ctx))
     assert not res.is_error
     assert "cut at" in res.content
+
+
+# ── the same rule, one layer down ────────────────────────────────────────────
+def test_the_cell_cap_keeps_the_tail_too(tmp_path):
+    """Regression, and the reason the per-result test above was not enough.
+
+    The Cell caps each stream at `max_output_bytes` BEFORE any result reaches
+    `cap_result`. While that cap was head-only, a command noisy enough to trip
+    it had its tail discarded at the sandbox boundary — so the head+tail preview
+    downstream was faithfully preserving a tail that had already been thrown
+    away. Two layers, the same reasoning, and only one of them had it.
+    """
+    cell = SubprocessCell(workspace=tmp_path,
+                          policy=CellPolicy(max_output_bytes=1_000))
+    capped = cell._cap("HEAD" + ("x" * 50_000) + "TAIL")        # noqa: SLF001
+    assert capped.startswith("HEAD")
+    assert capped.endswith("TAIL")
+    assert "omitted from the middle" in capped
+    assert len(capped) < 1_200

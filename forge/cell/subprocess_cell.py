@@ -21,6 +21,7 @@ import subprocess
 from pathlib import Path
 
 from forge.cell.base import Cell, CellPolicy, CommandResult
+from forge.cell.stream import REAP_GRACE_S, Retained, drain as drain_pipe
 
 
 def _posix_shell() -> str | None:
@@ -93,12 +94,13 @@ def _kill_tree(proc) -> None:
         pass
 
 
-def _release_pipes(proc) -> None:
-    """Close the pipes a cancelled `communicate()` left open.
 
-    Abandoning `communicate()` abandons its transport with it, and asyncio
-    complains about the unclosed pipe from a destructor later — at a point with
-    no connection to the command that caused it. A long session times out more
+def _release_pipes(proc) -> None:
+    """Close the pipes the cancelled readers left open.
+
+    Cancelling a reader abandons its transport with it, and asyncio complains
+    about the unclosed pipe from a destructor later — at a point with no
+    connection to the command that caused it. A long session times out more
     than one command, and a handle leaked per timeout is a slow one."""
     transport = getattr(proc, "_transport", None)
     if transport is None:
@@ -162,8 +164,45 @@ class SubprocessCell(Cell):
             raise PermissionError(f"path escapes the Cell workspace: {path!r}")
         return target
 
+    async def _await_drain(self, drain, t: int, on_output) -> None:
+        """Wait for the command's output to end, honouring the kill policy.
+
+        With `kill_on_timeout` set — the headless posture — this is a plain
+        deadline and the caller kills what is left. Nobody is watching a
+        dispatched job, so a command that never ends has to be ended for it.
+
+        With it clear — the interactive posture — the deadline stops being a
+        sentence and becomes a notice. The command keeps running, the operator
+        is told it has passed its budget and how to stop it, and the decision is
+        theirs. That is only safe because they can SEE it: the streaming above
+        is what makes an unbounded command something you are watching rather
+        than something you are waiting on. The notice repeats on the same
+        interval, because one line printed five minutes ago has scrolled away.
+        """
+        if self.policy.kill_on_timeout:
+            await asyncio.wait_for(drain, timeout=t)
+            return
+
+        elapsed = 0
+        while True:
+            try:
+                await asyncio.wait_for(asyncio.shield(drain), timeout=t)
+                return
+            except (asyncio.TimeoutError, TimeoutError):
+                elapsed += t
+                if on_output is None:
+                    continue
+                try:
+                    on_output("stderr",
+                              f"\n[still running after {elapsed}s — this workspace "
+                              f"does not stop long commands by itself; press ctrl+c "
+                              f"to stop it]\n")
+                except Exception:  # noqa: BLE001 — a renderer fault is not the command's
+                    on_output = None
+
     async def run(self, command: str, timeout: int | None = None,
-                  env: dict[str, str] | None = None) -> CommandResult:
+                  env: dict[str, str] | None = None,
+                  on_output=None) -> CommandResult:
         t = self._clamp_timeout(timeout)
         self.workdir.mkdir(parents=True, exist_ok=True)
         try:
@@ -191,28 +230,66 @@ class SubprocessCell(Cell):
                 )
         except OSError as e:
             return CommandResult("", f"failed to launch command: {e}", 1, False)
+        # Drained into buffers rather than collected by `communicate()`, so the
+        # output survives the deadline. `communicate()` returns its pair only on
+        # success; cancelled at the timeout it yields nothing, and everything the
+        # command printed before it wedged was discarded — which is precisely the
+        # output worth having. A hanging `pytest` names the test it stopped on; a
+        # hanging build names the file. Reporting "timed out after 60s" and
+        # nothing else turns a diagnosable hang into a guess.
+        #
+        # DockerCell never had this problem: its `timeout -s KILL` fires INSIDE
+        # the container, so `docker exec` returns normally, with the output. The
+        # two backends disagreeing about what a timeout tells you is the kind of
+        # difference that gets debugged twice.
+        out_buf = Retained(self.policy.max_output_bytes)
+        err_buf = Retained(self.policy.max_output_bytes)
+        drain = asyncio.gather(drain_pipe(proc.stdout, out_buf, "stdout", on_output),
+                               drain_pipe(proc.stderr, err_buf, "stderr", on_output))
         try:
-            out, err = await asyncio.wait_for(proc.communicate(), timeout=t)
-        except asyncio.TimeoutError:
+            await self._await_drain(drain, t, on_output)
+            await asyncio.wait_for(proc.wait(), timeout=REAP_GRACE_S)
+        except asyncio.CancelledError:
+            # The operator stopped this, and stopping it has to mean the process
+            # dies — not just that we stopped waiting. The no-kill path shields
+            # the readers so a passed deadline cannot cancel them, and that
+            # shield would otherwise survive this cancellation too: the command
+            # would keep running, holding its port and its lock, with nothing
+            # left watching it. "I decide when it stops" has to include being
+            # able to make it stop.
+            drain.cancel()
+            _kill_tree(proc)
+            _release_pipes(proc)
+            raise
+        except (asyncio.TimeoutError, TimeoutError):
+            # `wait_for` has already cancelled the readers; the buffers keep
+            # everything they had read up to that point, which is the whole
+            # reason they exist.
             _kill_tree(proc)
             # Pipes released BEFORE the reap, and the order is the whole point.
-            # `communicate()` was cancelled by the deadline with its readers
-            # still attached, and on a cancelled transport `wait()` does not
-            # come back when the process dies — it comes back when the readers
-            # do. Waiting first meant every timed-out command paid the full
-            # backstop below before returning. Closing the transport ends the
-            # readers, and the reap is then immediate.
+            # The readers were cancelled with the transport still attached, and
+            # on a cancelled transport `wait()` does not come back when the
+            # process dies — it comes back when the readers do. Waiting first
+            # meant every timed-out command paid the full grace below before
+            # returning. Closing the transport ends them, and the reap is
+            # then immediate.
             _release_pipes(proc)
             # Bounded even so: a cleanup path that can block forever is the bug
             # this is fixing wearing a different hat.
             try:
-                await asyncio.wait_for(proc.wait(), timeout=5)
-            except (asyncio.TimeoutError, ProcessLookupError):
+                await asyncio.wait_for(proc.wait(), timeout=REAP_GRACE_S)
+            except (asyncio.TimeoutError, TimeoutError, ProcessLookupError):
                 pass
-            return CommandResult("", f"command timed out after {t}s", 124, True)
+            note = f"\n[command timed out after {t}s and was killed]"
+            return CommandResult(
+                self._cap(out_buf.text()),
+                self._cap(err_buf.text()) + note,
+                124,
+                True,
+            )
         return CommandResult(
-            self._cap(out.decode("utf-8", "replace")),
-            self._cap(err.decode("utf-8", "replace")),
+            self._cap(out_buf.text()),
+            self._cap(err_buf.text()),
             proc.returncode if proc.returncode is not None else 1,
             False,
         )

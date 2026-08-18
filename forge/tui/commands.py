@@ -17,6 +17,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Awaitable, Callable
 
 if TYPE_CHECKING:
+    from forge.model.catalog import ProviderCatalog
+    from forge.tui.picker import Group
     from forge.tui.session import Session
 
 
@@ -229,9 +231,98 @@ def ansi_first_sentence(text: str, limit: int = 60) -> str:
     return head if len(head) <= limit else head[: limit - 1] + "…"
 
 
-@command("model", "which model this session uses")
+@command("model", "switch model — pick one, or /model <ref>", "models")
 async def _model(args: str, session: "Session") -> CommandResult:
-    return CommandResult(f"  {session.model_ref}\n  window {session.ledger.context_limit:,} tokens")
+    """Bare `/model` opens the picker; a ref switches straight to it.
+
+    The list comes from the providers themselves rather than from a table here,
+    and only from the ones whose key is set — see `forge/model/catalog.py`. A
+    typed ref is NOT validated against that list: a model released this morning
+    should be usable this morning, and the provider's own error is a better
+    referee than a cached list would be.
+
+    The switch is for this session only. The profile's `model_ref` is a
+    deployment fact and stays where it is; `--model` at launch is the way to
+    mean it every time.
+    """
+    from forge.config import ForgeSettings, load_env_files
+    from forge.model.catalog import PROVIDER_KEY_ENV, catalog, invalidate
+    from forge.tui import picker
+
+    arg = args.strip()
+    if arg in ("show", "which", "?"):
+        return CommandResult(f"  {session.model_ref}\n"
+                             f"  window {session.ledger.context_limit:,} tokens")
+    if arg and arg not in ("refresh", "reload"):
+        return _switch_to(session, arg)
+
+    if arg in ("refresh", "reload"):
+        # Re-read .env as well as dropping the cache: the operator who reaches
+        # for refresh has usually just pasted a key into it, and "restart the
+        # session" is a poor answer to that.
+        load_env_files()
+        invalidate()
+    settings = ForgeSettings.from_env()
+    groups = await catalog(settings)
+    if not groups:
+        keys_wanted = ", ".join(sorted(set(PROVIDER_KEY_ENV.values())))
+        return CommandResult(
+            f"  {session.model_ref}\n"
+            "  No provider is configured, so there is nothing to choose between.\n"
+            f"  Set one of {keys_wanted} in .env or ~/.forge/.env.")
+
+    if not any(c.models for c in groups):
+        # Every configured provider failed or answered empty. The picker would
+        # open on nothing and close again, and "still on the old model" is a
+        # true sentence that hides the only thing worth reading — which key is
+        # wrong, or which daemon is not running.
+        lines = [f"  {session.model_ref}",
+                 "  No provider could list its models:"]
+        for cat in groups:
+            lines.append(f"    {cat.provider:<10} {cat.error or 'returned nothing'}")
+        return CommandResult("\n".join(lines))
+
+    chosen = await picker.pick(
+        [_provider_group(c, session.model_ref) for c in groups],
+        title="model", current=session.model_ref)
+    if chosen is None:
+        return CommandResult(f"  Still {session.model_ref}.")
+    return _switch_to(session, chosen)
+
+
+def _provider_group(cat: "ProviderCatalog", current: str) -> "Group":
+    """One provider's models as a picker group.
+
+    The heading carries the count and, when the filter dropped anything, how
+    much it dropped — an operator looking for an embedding model needs to see
+    that the list is not everything the endpoint said.
+    """
+    from forge.tui.picker import Group, Option
+
+    title = cat.provider
+    if cat.models:
+        title += f"   {len(cat.models)} models"
+        if cat.hidden:
+            title += f" · {cat.hidden} non-chat hidden"
+    return Group(
+        title=title,
+        options=tuple(Option(value=m.ref,
+                             label=m.model_id,
+                             hint="· current" if m.ref == current else m.label)
+                      for m in cat.models),
+        note=cat.error,
+    )
+
+
+def _switch_to(session: "Session", ref: str) -> CommandResult:
+    """Point the session at `ref`. Takes effect on the next turn, because that
+    is when the model is built — nothing in flight is disturbed."""
+    previous = session.model_ref
+    if ref == previous:
+        return CommandResult(f"  Already on {ref}.")
+    session.model_ref = ref
+    return CommandResult(f"  {previous}  →  {ref}\n"
+                         "  Takes effect on the next turn; history carries over.")
 
 
 @command("agent", "the agent profile in use")
@@ -253,13 +344,22 @@ async def _approved(args: str, session: "Session") -> CommandResult:
                          + f"\n\n  Stored in {session.allowlist.path or '(memory only)'}")
 
 
-@command("transcript", "dump the raw conversation")
+@command("transcript", "page through the raw conversation")
 async def _transcript(args: str, session: "Session") -> CommandResult:
+    """Paged rather than dumped.
+
+    Printing a long conversation into scrollback buries the conversation under a
+    copy of itself, and takes the operator's own scrollback — the thing they
+    would have scrolled to find this — with it. `pager.page` prints only what
+    was asked for and stops on `q`, so what is left behind is what they chose to
+    read. Returns empty text because the pager has already written."""
+    from forge.tui import pager
     from forge.warden.compaction import render_for_summary
 
     if not session.messages:
         return CommandResult("Empty.")
-    return CommandResult(render_for_summary(session.messages))
+    await pager.page(render_for_summary(session.messages), title="transcript")
+    return CommandResult("")
 
 
 @command("cwd", "which directory the agent is working in")
@@ -425,11 +525,13 @@ async def _keys(args: str, session: "Session") -> CommandResult:
         ("↑ / ↓", "walk the history of what you typed here"),
         ("ctrl+r", "search that history"),
         ("esc then enter", "newline instead of submitting"),
+        ("ctrl+x ctrl+e", "open $EDITOR on what you are typing"),
         ("tab", "complete a /command or an @path"),
         ("shift+tab", "switch act / plan"),
         ("ctrl+o", "reprint the last shortened tool output in full"),
         ("ctrl+c", "interrupt the running turn (again at an empty prompt exits)"),
         ("ctrl+d", "end the session"),
+        ("type while it works", "steer the run — picked up at the next step"),
         ("!cmd", "run a shell command with no model turn"),
         ("@path", "complete a file from this workspace"),
     ]
@@ -653,6 +755,29 @@ async def _review(args: str, session: "Session") -> CommandResult:
 
 
 # ── Picking a conversation back up ───────────────────────────────────────────
+
+
+@command("plugins", "what the plugin manifest loaded, and what failed")
+async def _plugins(args: str, session: "Session") -> CommandResult:
+    """Loaded is not the same as attached.
+
+    A plugin whose `apply` ran but registered nothing looks identical to a
+    working one from the outside — the manifest names it, the log says loaded,
+    and it does nothing. So this reports the EVENTS each plugin is actually on
+    and the tools it actually contributed, which is the difference between
+    "installed" and "in effect". Failures are listed with their reason rather
+    than omitted, because a plugin silently missing is the thing an operator
+    spends longest not noticing."""
+    plugins = getattr(getattr(session, "extensions", None), "plugins", None)
+    if plugins is None:
+        return CommandResult(
+            "  No plugins loaded.\n"
+            "  Add a \"plugins\" list to .forge/extensions.json — see\n"
+            "  forge/plugins/__init__.py for the contract.")
+    rows = plugins.describe()
+    if not rows:
+        return CommandResult("  The plugin manifest is empty.")
+    return CommandResult("\n".join(["  Plugins:", *rows]))
 
 
 @command("sessions", "conversations you can resume in this workspace", "ls")

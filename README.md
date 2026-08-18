@@ -8,7 +8,7 @@ Forge provides a terminal interface for interactive work and a WebSocket peer
 interface for accepting jobs from SPEDA Mark VI. Both run the same engine.
 
 ```bash
-pip install -e ".[tui,providers]"
+./install.sh            # Windows: .\install.ps1
 cd your-project
 forge chat
 ```
@@ -83,9 +83,42 @@ Capabilities:
 
 ## Installation
 
+One command from a fresh clone to a working `forge`. The script finds a Python
+3.11+, builds a `.venv`, installs the Forge with the extras that make it
+usable, seeds a `.env`, and proves the install by listing the agents. Rerunning
+it is safe — an existing environment is reused and an existing `.env` is never
+touched.
+
+**Windows** (PowerShell):
+
+```powershell
+git clone https://github.com/spedatox/forge-mark1.git; cd forge-mark1; .\install.ps1 -AddToPath
+```
+
+**macOS / Linux**:
+
 ```bash
-git clone https://github.com/spedatox/forge-mark1.git
-cd forge-mark1
+git clone https://github.com/spedatox/forge-mark1.git && cd forge-mark1 && ./install.sh --add-to-path
+```
+
+`-AddToPath` / `--add-to-path` puts the environment's `Scripts` (`bin` on
+Unix) directory on your PATH, so `forge` works in any project without
+activating anything. Leave it off and the script prints the full path to run
+instead.
+
+Other flags, the same on both scripts:
+
+| Flag | Effect |
+|---|---|
+| `-NoVenv` / `--no-venv` | Install into the interpreter itself instead of a `.venv` — what a server unit file wants |
+| `-Extras providers` / `--extras providers` | Choose the optional-dependency groups (default `tui,providers,dev`) |
+| `-Python <path>` / `--python <path>` | Build from a specific interpreter |
+
+### Installing by hand
+
+The scripts do exactly this:
+
+```bash
 python -m venv .venv
 . .venv/bin/activate            # Windows: .venv\Scripts\activate
 pip install -e ".[tui,providers,dev]"
@@ -99,23 +132,42 @@ Optional extras:
 | `providers` | OpenAI, Gemini, z.ai, DeepSeek and Ollama support |
 | `graph` | Codebase structure queries |
 | `dev` | Test dependencies |
+| `all` | `tui`, `providers` and `graph` together |
 
-Forge reads configuration from the environment rather than loading a `.env`
-file itself. Export the variables directly, or source a file first:
+### Configuration
+
+Forge loads two `.env` files at startup, most specific first, and a real
+environment variable beats both:
+
+| File | Covers |
+|---|---|
+| `./.env` | the project you are sitting in |
+| `~/.forge/.env` (or `$FORGE_HOME/.env`) | every project on the machine |
+
+`.env.example` documents every variable; the installer copies it to `.env` when
+neither file exists yet. Put your API key in it. For a machine-wide install,
+move it where every project will find it:
 
 ```bash
-set -a && . ./.env && set +a
+mkdir -p ~/.forge && cp .env ~/.forge/.env
 ```
 
-Verify the installation:
+Only one key is genuinely required — whichever provider your agent's model ref
+names. Everything else is optional and fails loudly at the point it is needed.
+
+### Verify
 
 ```bash
 forge agents          # lists configured agents and their models
+forge demo            # a full offline turn — no API key, no network
 forge chat            # then type /doctor
 ```
 
-`/doctor` reports missing API keys, an unreachable sandbox, and anything else
-that would otherwise fail partway through a task.
+`forge demo` is the fastest proof that a machine is set up correctly: it runs a
+real end-to-end turn against a scripted model, exercising the engine, the tools
+and the sandbox without touching a provider. `/doctor` reports missing API
+keys, an unreachable sandbox, and anything else that would otherwise fail
+partway through a task.
 
 ---
 
@@ -187,7 +239,7 @@ cannot see; the swap is printed when it happens.
 | `/compact` | Summarise the conversation to free context |
 | `/clear` | Discard the conversation, keep the session |
 | `/tools` | Tools available to this agent |
-| `/model` | Model in use |
+| `/model [ref]` | Pick a model from the providers you have keys for, or switch straight to a ref |
 | `/agent` | Agent profile in use |
 | `/approved` | Operations approved for this session |
 | `/transcript` | Print the raw conversation |
@@ -455,9 +507,34 @@ enough to require compaction are the ones with a plan worth keeping.
 A bare reference is treated as Anthropic. Non-Anthropic providers require the
 `providers` extra.
 
+### Choosing one mid-session
+
+```
+/model                  pick from a list, grouped by provider
+/model openai:gpt-5.1   switch straight to a reference
+/model refresh          re-ask the providers (after adding a key)
+/model show             what is running now
+```
+
+`/model` asks each provider whose key is set what it currently serves, and
+shows the answers grouped under provider headings — so the list is what your
+keys can actually reach today rather than a table that goes stale when a model
+ships. Arrows move, typing narrows the list, enter selects, escape cancels.
+
+Only configured providers are asked; a provider that fails keeps its heading
+and shows why, which is the quickest way to find out a key is wrong. Embedding,
+speech and image models are filtered out, with the count of what was hidden in
+the heading. Answers are cached for ten minutes.
+
+A typed reference is not checked against that list — a model released this
+morning is usable this morning, and the provider is a better referee than a
+cache. The switch lasts for the session and takes effect on the next turn, with
+the conversation carried over; the profile's `model_ref` is untouched.
+
 Selection order, highest priority first:
 
-1. `--model` on the command line, or the model named in a job request
+1. `/model` in a session, `--model` on the command line, or the model named in
+   a job request
 2. The agent's `vision_model`, when the turn carries an image
 3. `FORGE_LLM_FALLBACK_CHAIN`, tried in order when a provider fails
 4. The agent's `profile.toml`

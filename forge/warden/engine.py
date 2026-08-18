@@ -35,6 +35,8 @@ from forge.warden.compaction import (
 )
 from forge.warden.dispatch import dispatch_tool, to_anthropic_tool_result
 from forge.warden.filestate import digest
+from forge.warden import inbox as inbox_mod
+from forge.warden.inbox import Inbox
 from forge.warden.ledger import TokenLedger
 from forge.warden.results import enforce_batch_budget
 from forge.warden import reminders
@@ -162,6 +164,7 @@ class Warden:
         retry_attempts: int = RETRY_ATTEMPTS,
         retry_base_delay: float = RETRY_BASE_DELAY_S,
         refresh_tools: Callable[[], Awaitable[dict[str, Tool]]] | None = None,
+        inbox: "Inbox | None" = None,
     ) -> None:
         self.system_prompt = system_prompt
         self.tools = tools
@@ -176,6 +179,10 @@ class Warden:
         self.retry_attempts = retry_attempts
         self.retry_base_delay = retry_base_delay
         self.refresh_tools = refresh_tools
+        self.inbox = inbox
+        """Where the operator's mid-run input waits. None in every headless
+        path — a dispatched job has nobody at a keyboard, and an inbox that can
+        never be filled is one more thing for the loop to check per iteration."""
         self._reminders = reminders.ReminderState()
         """Per-Warden, so a subagent's observations never leak into its
         parent's — a child that retried a failing call says nothing about
@@ -300,6 +307,22 @@ class Warden:
                               f"attempt {state.truncation_resumes}")
                 continue
 
+            # ── The operator said something while this was running. ──────────
+            # Checked BEFORE the completion branch, because the most valuable
+            # moment for an interjection is exactly the one where the model has
+            # decided it is finished and the operator has not. Landing it here
+            # continues the turn instead of ending it and making them start
+            # another to say the same thing.
+            if not turn.tool_uses and self.inbox:
+                claimed = self.inbox.claim()
+                if claimed:
+                    state.messages.append(
+                        {"role": "user", "content": inbox_mod.render(claimed)})
+                    await self.emit({"type": "steered",
+                                     "data": {"count": len(claimed), "at": "turn_end"}})
+                    state.advance(ContinueReason.NEXT_TURN, "operator interjection")
+                    continue
+
             if not turn.tool_uses:
                 if self._unverified(state):
                     state.verification_nudged = True
@@ -340,6 +363,21 @@ class Warden:
                 result_blocks = [*result_blocks, {"type": "text", "text": nudge}]
                 logger.info("reminder_fired",
                             extra={"iteration": state.iteration, "files": changed})
+
+            # Rides with the tool results rather than as its own message, for
+            # the reason `inbox.py` gives at length: a separate user message
+            # would break the strict alternation `find_cut` and `rebuild`
+            # depend on. Appended last so it is the final thing read before the
+            # model plans its next move.
+            if self.inbox:
+                claimed = self.inbox.claim()
+                if claimed:
+                    result_blocks = [*result_blocks,
+                                     {"type": "text", "text": inbox_mod.render(claimed)}]
+                    logger.info("operator_interjection",
+                                extra={"iteration": state.iteration, "count": len(claimed)})
+                    await self.emit({"type": "steered",
+                                     "data": {"count": len(claimed), "at": "tool_results"}})
 
             state.messages.append({"role": "user", "content": result_blocks})
 
@@ -676,7 +714,8 @@ class Warden:
         the top of a large repo sweep — a 40-call grep batch would otherwise open
         40 simultaneous subprocesses in the Cell."""
         async with self._tool_slots:
-            return await dispatch_tool(self.tools, tu.name, tu.input, self.ctx)
+            return await dispatch_tool(self.tools, tu.name, tu.input, self.ctx,
+                                       abort=self.signal)
 
     # ── Terminal helpers ─────────────────────────────────────────────────────
     def _interrupted_results(self, tool_uses: list[ToolUseRequest]) -> dict[str, Any]:

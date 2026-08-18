@@ -21,10 +21,16 @@ systemd: forge@<agent>.service              (host, root — needs the docker soc
 ```bash
 git clone https://github.com/spedatox/forge-mark1.git /opt/forge-mk1
 cd /opt/forge-mk1
-python3 -m venv .venv
-./.venv/bin/pip install -e ".[providers]"
+./install.sh --extras providers       # .venv + deps, then verifies
 docker pull python:3.12-slim          # the Cell image
 ```
+
+The installer is the same script a developer runs on a laptop; `--extras
+providers` is the only difference, because a server has no terminal UI to
+install for. It ends by listing the agents, so a box that cannot start the
+Forge says so here rather than at the first `systemctl start`. By hand it is
+`python3 -m venv .venv && ./.venv/bin/pip install -e ".[providers]"` — the unit
+file calls `.venv/bin/python` either way.
 
 The `providers` extra is **not** optional in practice on this deployment. It
 pulls the OpenAI client, which every non-Anthropic provider shares (OpenAI,

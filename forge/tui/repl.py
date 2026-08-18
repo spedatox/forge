@@ -15,15 +15,32 @@ survive. So the session owns the Cell and each turn borrows it.
 abort signal at both boundaries and returns a clean ABORTED terminal, so the
 handler here only has to set the signal and let the loop unwind — the transcript
 stays well-formed and the next prompt starts from a consistent state.
+
+That was the intent and it did not hold. Relying on the default `KeyboardInterrupt`
+meant the interrupt was raised wherever the interpreter happened to be — which,
+during a turn, is almost always inside the Warden task rather than at the
+`await` watching it. The task then finished *carrying* KeyboardInterrupt, the
+handler's `await warden_task` re-raised it, and it unwound past this module to
+`__main__`, where `except KeyboardInterrupt: return 0` ended the process. Ctrl-C
+killed Forge instead of the turn, which is the opposite of what this paragraph
+promised.
+
+So the signal is now captured for the duration of a turn (`_interrupts_go_to`)
+and converted into the abort event directly, and no exit path from `_run_turn`
+is allowed to propagate an interrupt. A SECOND ctrl-C inside the same turn does
+force its way out — an agent wedged somewhere the boundaries cannot see must
+still be escapable, and a polite request that cannot be repeated is a trap.
 """
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
+import signal as signalmod
 import time
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from forge.agents.registry import AgentRegistry
 from forge.cell.factory import build_cell
@@ -37,6 +54,7 @@ from forge.tui.render import StreamRenderer, banner, humanize_error
 from forge.tui import input as input_mod
 from forge.tui.input import InputBar
 from forge.tui.session import Session
+from forge.tui.composer import Composer
 from forge.tui.live import LiveRegion
 from forge.tui import notify, persistence, status, ui
 from forge.warden.compaction import (
@@ -49,9 +67,10 @@ from forge.warden.compaction import (
 from forge.warden import images
 from forge.warden.engine import Warden
 from forge.warden.filestate import FileStateCache
+from forge.warden.inbox import Inbox
 from forge.warden.ledger import TokenLedger
 from forge.warden.permissions import AllowList, Mode, PermissionEngine
-from forge.warden.state import StopReason
+from forge.warden.state import StopReason, Terminal
 from forge.warden.subagents import SubagentRunner
 from forge.warden.tool import ToolContext
 from forge.warden.toolsource import (close_providers, fold_providers,
@@ -85,6 +104,15 @@ async def run_repl(agent: str = "optimus", workspace: Path | None = None,
             policy=CellPolicy(allow_network=cfg.cell.allow_network,
                               cpus=cfg.cell.cpus, memory_mb=cfg.cell.memory_mb,
                               default_timeout_s=cfg.cell.timeout_s,
+                              # A person is present for this whole session, so
+                              # they are the stopping condition rather than the
+                              # clock. The profile's timeout still governs when
+                              # they are TOLD a command has run long; it no
+                              # longer decides on their behalf. Safe only here,
+                              # and only because the two things it depends on
+                              # are also only here: live output above, and a
+                              # ctrl+c that reaches the loop.
+                              kill_on_timeout=False,
                               run_as_root=cfg.cell.run_as_root,
                               cap_add=cfg.cell.cap_add,
                               # So a commit records who actually wrote it.
@@ -104,6 +132,7 @@ async def run_repl(agent: str = "optimus", workspace: Path | None = None,
             ledger=TokenLedger(context_limit=settings.context_limit,
                                max_output_tokens=settings.max_tokens),
             allowlist=AllowList.load(settings.allowlist_path),
+            extensions=extensions,
             session_id=persistence.new_id())
 
         ansi.write(banner(f"{cfg.name} ({cfg.agent_id})", model_ref, str(workspace), len(tools)))
@@ -113,6 +142,9 @@ async def run_repl(agent: str = "optimus", workspace: Path | None = None,
         return 1
     finally:
         await close_providers(providers)
+        # Plugins go with the providers, and after them: a plugin may have
+        # published a service a provider is still using while it closes.
+        extensions.unload()
         if cell is not None:
             await cell.close()
 
@@ -149,7 +181,13 @@ async def _loop(session: Session, settings: ForgeSettings, extensions, verbose: 
         # transcript above it are the same shape.
         ansi.write(ui.prompt_top() or ansi.paint(
             "─" * max(10, ansi.terminal_width() - 1), "dim"))
-        entry = await bar.read(ui.prompt_lead() or ansi.paint("› ", "grey"))
+        # Text typed during the last turn that no boundary claimed. Pre-filled
+        # rather than submitted: the turn it was aimed at is over, so the
+        # operator gets to see it in context and decide whether it still says
+        # what they meant before it becomes a prompt of its own.
+        carried, session.pending_prompt = session.pending_prompt, ""
+        entry = await bar.read(ui.prompt_lead() or ansi.paint("› ", "grey"),
+                               prefill=carried)
         if entry.is_eof:
             ansi.write()
             return 0
@@ -266,17 +304,21 @@ async def _run_bash(command: str, session: Session) -> None:
         ansi.write(ansi.paint("  no Cell attached — nothing to run in", "yellow"))
         return
     ansi.write(ansi.paint(f"  ! {command}", "grey"))
+
+    def _live(_stream: str, text: str) -> None:
+        """Straight through, unindented and uncoloured.
+
+        The operator typed this command themselves and is watching it happen;
+        the right rendering of `npm run build` is the one `npm run build`
+        produces. Indenting each line would break every progress bar and every
+        carriage-return redraw the tool is doing on purpose."""
+        ansi.write(text, end="")
+
     try:
-        result = await session.cell.run(command)
+        result = await session.cell.run(command, on_output=_live)
     except Exception as e:  # noqa: BLE001 — a bad command must not end the session
         ansi.write(ansi.paint(f"  failed: {e}", "red"))
         return
-    for stream, style in ((result.stdout, None), (result.stderr, "red")):
-        text = (stream or "").rstrip()
-        if not text:
-            continue
-        for line in text.splitlines():
-            ansi.write(ansi.paint(f"  {line}", style) if style else f"  {line}")
     if result.exit_code != 0:
         ansi.write(ansi.paint(f"  exit {result.exit_code}", "yellow"))
 
@@ -387,6 +429,84 @@ def _model_ref_for(session: Session, pending: list[dict]) -> str:
     return cfg.vision_model
 
 
+def _aborted_terminal(session: Session) -> Terminal:
+    """What a forced stop leaves behind.
+
+    The transcript is whatever the session already had: a cancelled task cannot
+    be asked what it had reached, so nothing new is claimed about it. The next
+    turn re-seeds from here, and `repair_transcript` fixes any tool_use left
+    without its result — which is exactly the shape a forced cancel produces."""
+    return Terminal(reason=StopReason.ABORTED, final_text="",
+                    iterations=0, error=None, messages=list(session.messages),
+                    transitions=(), usage=session.ledger.snapshot())
+
+
+async def _settle(task: "asyncio.Task", session: Session) -> Terminal:
+    """Wait out an interrupted turn without letting anything escape.
+
+    Every ending is a Terminal: the loop's own ABORTED if it reached a boundary,
+    a synthesised one if it was cancelled or raised on the way out. The one
+    outcome not permitted here is an exception, because the caller's job is to
+    print a result and return to the prompt."""
+    try:
+        return await task
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        return _aborted_terminal(session)
+    except Exception:  # noqa: BLE001 — the turn is over either way
+        return _aborted_terminal(session)
+
+
+@contextlib.contextmanager
+def _interrupts_go_to(abort: asyncio.Event, notify: "Callable[[int], None]"):
+    """Route SIGINT into `abort` for the duration of a turn, then put it back.
+
+    Installed per turn rather than per process, because ctrl-C means two
+    different things in the two states. At the prompt it should clear the line
+    or leave, which `InputBar` already handles through the normal
+    KeyboardInterrupt; mid-turn it must reach the loop's abort event instead of
+    being raised into whatever coroutine frame happened to be executing.
+
+    `signal.signal` rather than `loop.add_signal_handler`: the latter is not
+    implemented on Windows' Proactor loop, and this is the surface a person uses
+    on a laptop. The handler runs in the main thread between bytecodes, so it
+    hands the work to the loop with `call_soon_threadsafe` instead of touching
+    the event directly.
+
+    The second press escalates. The first is a request the loop honours at its
+    next boundary — which is the right default, because it lets the transcript
+    close cleanly — but a boundary that is never reached would make that request
+    unanswerable, and an operator holding a terminal that ignores ctrl-C has no
+    move left. So the count is kept, and the second press cancels for real.
+
+    Restores the previous handler unconditionally: a turn that raised must not
+    leave the next prompt with a hijacked ctrl-C.
+    """
+    loop = asyncio.get_running_loop()
+    presses = 0
+
+    def _on_sigint(_signum, _frame) -> None:
+        nonlocal presses
+        presses += 1
+        count = presses
+        loop.call_soon_threadsafe(abort.set)
+        loop.call_soon_threadsafe(notify, count)
+
+    try:
+        previous = signalmod.signal(signalmod.SIGINT, _on_sigint)
+    except (ValueError, OSError):
+        # Not the main thread, or a platform that will not let us. The old
+        # behaviour is still better than refusing to run the turn.
+        yield lambda: 0
+        return
+    try:
+        yield lambda: presses
+    finally:
+        try:
+            signalmod.signal(signalmod.SIGINT, previous)
+        except (ValueError, OSError):
+            pass
+
+
 async def _run_turn(prompt: Any, session: Session, settings: ForgeSettings,
                     extensions, verbose: bool) -> None:
     signal = asyncio.Event()
@@ -401,6 +521,11 @@ async def _run_turn(prompt: Any, session: Session, settings: ForgeSettings,
     # has to be able to read the signal itself — otherwise ctrl+c on a gated
     # `run_command` sets a flag nothing ever looks at.
     session.oracle.signal = signal
+    # Per turn, not per session: an inbox that outlived its turn would deliver
+    # last turn's afterthought into this one's opening move, which is worse
+    # than losing it. Anything unclaimed at the end is carried forward
+    # explicitly and visibly instead (see the end of this function).
+    inbox = Inbox()
     renderer = StreamRenderer(
         verbose=verbose, spinner=spinner,
         on_truncated=lambda name, text: setattr(session, "last_truncated", (name, text)),
@@ -414,6 +539,8 @@ async def _run_turn(prompt: Any, session: Session, settings: ForgeSettings,
         network_allowed=session.cfg.cell.allow_network,
         oracle=session.oracle,
         hooks=list(extensions.hooks),
+        on_command_output=renderer.command_output,
+        bus=extensions.bus,
     )
 
     turn_model_ref = _model_ref_for(session, [{"role": "user", "content": prompt}])
@@ -451,6 +578,7 @@ async def _run_turn(prompt: Any, session: Session, settings: ForgeSettings,
         retry_base_delay=settings.retry_base_delay_s,
         refresh_tools=_tools,
         emit=renderer,
+        inbox=inbox,
     )
 
     # Subagents get the same Cell, model, interrupt signal and ledger as the
@@ -472,23 +600,73 @@ async def _run_turn(prompt: Any, session: Session, settings: ForgeSettings,
     # everything said so far, so turn nine remembers turn three.
     warden_task = asyncio.create_task(_drive(warden, session, prompt))
     started = time.monotonic()
+
+    # The composer polls stdin for the length of the turn. It must be attached
+    # BEFORE the region starts drawing, so the first frame already has room for
+    # it rather than the region growing a row under the operator's hands.
+    composer = Composer(inbox, on_abort=lambda: _pressed(_bump()))
+    spinner.attach_composer(composer)
     spinner.start()
-    try:
-        terminal = await asyncio.shield(warden_task)
-    except KeyboardInterrupt:
-        # Ask the loop to stop at its next boundary. It back-fills any pending
-        # tool_results so the transcript stays well-formed, then returns ABORTED.
+    composer.start()
+
+    presses = 0
+
+    def _bump() -> int:
+        """Ctrl+c read as a KEY rather than delivered as a signal.
+
+        In raw mode the tty does not raise SIGINT, so while the composer is
+        polling this is the only path an interrupt takes. It shares the counter
+        with the signal handler so the first press is always the polite one and
+        the second always forces, regardless of which route each arrived by —
+        an operator pressing twice must not be told twice that they can press
+        again."""
+        nonlocal presses
+        presses += 1
         signal.set()
+        return presses
+
+    def _pressed(count: int) -> None:
+        """Say what the press did. Silence here is what makes an operator press
+        again harder — and the second press is the one that hurts."""
         spinner.set_status("Interrupting")
         ansi.write()
-        ansi.write(ansi.paint("  ⏹ interrupting…", "yellow"))
-        terminal = await warden_task
-    except asyncio.CancelledError:
+        if count == 1:
+            ansi.write(ansi.paint(
+                "  ⏹ interrupting — finishing the current step so the "
+                "transcript stays intact (ctrl+c again to force)", "yellow"))
+        else:
+            ansi.write(ansi.paint("  ⏹ forcing the turn to stop…", "red"))
+            warden_task.cancel()
+
+    try:
+        with _interrupts_go_to(signal, _pressed):
+            try:
+                terminal = await asyncio.shield(warden_task)
+            except asyncio.CancelledError:
+                # The forced path: the second press cancelled the task. That is
+                # the operator's decision arriving, not a failure, so it becomes
+                # an ABORTED terminal like any other stop.
+                if not warden_task.cancelled():
+                    raise
+                terminal = _aborted_terminal(session)
+            except KeyboardInterrupt:
+                # Only reachable if the handler could not be installed. Same
+                # ending: ask, wait, and never let it past this frame.
+                signal.set()
+                terminal = await _settle(warden_task, session)
+    except KeyboardInterrupt:
+        # The last line of defence. An interrupt raised anywhere in the block
+        # above — including inside `_settle` — must not reach `_loop`, because
+        # `__main__` reads it as "leave" and ends the session. The turn is over;
+        # the conversation is not.
         signal.set()
-        raise
+        terminal = await _settle(warden_task, session)
     finally:
         # Always: an exception must not leave a spinner redrawing over the
-        # next prompt forever.
+        # next prompt forever. The composer stops first — it writes into the
+        # region's frame, and a poller still running while the region tears
+        # down would draw into rows that no longer exist.
+        leftover = await composer.stop()
         await spinner.stop()
 
     session.messages = list(terminal.messages)
@@ -496,6 +674,22 @@ async def _run_turn(prompt: Any, session: Session, settings: ForgeSettings,
     persistence.save(session, session.session_id)
     _report(terminal, session, verbose, already_shown=renderer.saw_error,
             seconds=time.monotonic() - started)
+
+    # Nothing the operator typed is lost. Two ways it can survive the turn: a
+    # half-finished draft, and a message queued so late that the loop reached
+    # its Terminal before any boundary could claim it. Both come back as the
+    # next prompt rather than disappearing — text that vanishes is how an input
+    # line stops being trusted, and an operator who has been burned once starts
+    # waiting for turns to end before typing, which is the whole feature gone.
+    carried = [*inbox.peek(), *( [leftover] if leftover.strip() else [] )]
+    if carried:
+        inbox.claim()
+        session.pending_prompt = "\n\n".join(carried)
+        ansi.write(ansi.paint(
+            f"  ┆ carried over to the next prompt: "
+            f"{ansi.truncate(carried[0], 60)}"
+            f"{f' (+{len(carried) - 1} more)' if len(carried) > 1 else ''}",
+            "cyan"))
 
 
 async def _drive(warden: Warden, session: Session, prompt: Any):

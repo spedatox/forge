@@ -46,6 +46,28 @@ def load_dotenv(path: Path | None = None) -> int:
     return count
 
 
+def load_env_files() -> int:
+    """Load both `.env` files the Forge honours. Returns how many names were set.
+
+    Two files, most specific first, because `load_dotenv` never overwrites a
+    name that is already set. So the precedence is: real environment > this
+    project's `.env` > the user's own. The user-level file is what makes a
+    global install usable — `forge` run in a repo that has never heard of it
+    still finds the operator's keys, instead of needing a copy in every project
+    they open.
+
+    Called at startup, and again by `/model refresh`: an operator who has just
+    pasted a key into `.env` means to use it now, and telling them to restart
+    the session to pick it up is a worse answer than reading the file twice.
+    Idempotent, because a name already in the environment is left alone.
+    """
+    from pathlib import Path
+
+    count = load_dotenv()
+    home = Path(os.environ.get("FORGE_HOME") or (Path.home() / ".forge"))
+    return count + load_dotenv(home / ".env")
+
+
 def _env(name: str, default: str = "") -> str:
     return os.environ.get(name, default).strip()
 

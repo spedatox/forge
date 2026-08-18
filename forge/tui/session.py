@@ -331,6 +331,22 @@ class Session:
     checkpoints: list[dict[str, Any]] = field(default_factory=list)
     """Conversation checkpoints taken with /checkpoint. Each is {turn, messages,
     timestamp}. /restore reverts to one of these, discarding later turns."""
+    pending_prompt: str = ""
+    """Text the operator typed during a turn that no boundary claimed.
+
+    Set when a turn ends with a draft still in the composer or a message still
+    queued; consumed by `_loop` as the next prompt. It exists so that typing
+    something a moment too late costs nothing — the alternative is text that
+    silently disappears, and an operator who has been burned once starts waiting
+    for turns to finish before typing, which removes the point of being able to
+    type at all."""
+
+    extensions: Any = None
+    """What `load_extensions` built for this process — providers, fragments,
+    and the loaded plugin set. Carried here so `/plugins` can report what is
+    actually attached rather than what the manifest asked for; the two differ
+    exactly when something went wrong, which is when anyone looks."""
+
     input_bar: Any = None
     session_id: str = ""
     """Filename this conversation persists to. A resumed session keeps its

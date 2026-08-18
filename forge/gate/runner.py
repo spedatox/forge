@@ -62,6 +62,7 @@ async def run_job(
     oracle: Any | None = None,
     tool_providers: list[ToolProvider] | None = None,
     hooks: list | None = None,
+    bus: Any | None = None,
     fragments: list[PromptFragment] | None = None,
     event_sinks: list | None = None,
     memory: Any | None = None,
@@ -165,6 +166,7 @@ async def run_job(
             oracle=oracle,                    # Seam 2
             memory=memory,                    # the owner's memory, in Mark VI
             hooks=list(hooks or []),          # Seam 3
+            bus=bus,                          # the plugin waterfall, when loaded
         )
 
         async def _tools() -> dict:

@@ -24,7 +24,8 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 from forge.warden.oracle import has_consult
-from forge.warden.tool import Tool, ToolContext, ToolResult
+from forge.warden.tool import (
+    BACKSTOP_GRACE_S, DEFAULT_TOOL_TIMEOUT_S, Tool, ToolContext, ToolResult)
 
 _NO_ORACLE = (
     "There is no operator channel on this job, so nobody can be asked. Do not "
@@ -67,6 +68,20 @@ class AskOperator(Tool):
     # Never batched. Two questions arriving at once is the shape that trains an
     # owner to stop reading them.
     CONCURRENCY_SAFE = False
+
+    def timeout_s(self, args: AskOperatorArgs, ctx: ToolContext) -> float:
+        """Read from the oracle's own clock, because a person is on the end of it.
+
+        `FORGE_ASK_TIMEOUT_S` is how long the owner gets to answer, and an
+        operator running a Telegram channel rather than a terminal reasonably
+        sets it to many minutes. A flat backstop would cancel the wait partway
+        through and tell the model the tool was hanging, when it was doing the
+        one thing it exists to do. The park is deliberate; only a park that
+        outlives the oracle's own expiry is a fault."""
+        park = getattr(getattr(ctx, "oracle", None), "_timeout", None)
+        if not isinstance(park, (int, float)):
+            return DEFAULT_TOOL_TIMEOUT_S
+        return float(park) + BACKSTOP_GRACE_S
 
     async def call(self, args: AskOperatorArgs, ctx: ToolContext) -> ToolResult:
         oracle = getattr(ctx, "oracle", None)

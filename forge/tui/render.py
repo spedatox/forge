@@ -44,6 +44,10 @@ class StreamRenderer:
         self._batch = 0                 # calls in the current parallel batch
         self._tool_names: dict[str, str] = {}
         self.saw_error = False          # so the turn summary does not repeat it
+        self._saw_command_output = False
+        """Whether a command has printed live this turn. The result line that
+        follows is then a duplicate of what is already on screen, so it is
+        summarised rather than repeated — see `_on_tool_result`."""
 
     async def __call__(self, event: Any) -> None:
         kind = getattr(event, "type", None) or event.get("type")
@@ -54,6 +58,49 @@ class StreamRenderer:
         if self.spinner is not None:
             self.spinner.clear()
         handler(data)
+
+    def _on_steered(self, data: Any) -> None:
+        """Confirm that what the operator typed mid-turn actually landed.
+
+        Without this the composer swallows a message and nothing visible
+        changes until the model's behaviour shifts several seconds later — by
+        which point the operator has usually typed it again. The line names
+        WHERE it landed, because "picked up with the tool results" and "picked
+        up as the turn was ending" are different amounts of interruption and an
+        operator can tell which one they wanted."""
+        count = (data or {}).get("count", 1) if isinstance(data, dict) else 1
+        where = (data or {}).get("at", "") if isinstance(data, dict) else ""
+        when = {"tool_results": "picked up mid-step",
+                "turn_end": "picked up as the turn was ending"}.get(
+                    where, "picked up")
+        noun = "message" if count == 1 else "messages"
+        _write_gutter(ansi.paint(f"┆ your {noun} {when}", "cyan"))
+        self._last_was_harness = True
+
+    # ── A running command, as it runs ────────────────────────────────────────
+    def command_output(self, stream: str, text: str) -> None:
+        """Write a chunk of a live command straight to the terminal.
+
+        Not an event handler, and not on the emit channel: this is the operator
+        watching a build, not part of the job record. It is called directly by
+        the Cell through `ctx.on_command_output`, synchronously, from inside the
+        pipe reader — so it does the least possible work and never raises. The
+        reader is also what keeps the pipe from filling, and a renderer that
+        threw or blocked here would stall the command it is displaying.
+
+        Dimmed, and stderr no differently from stdout. Colouring stderr red
+        would mark every progress bar and every compiler note as a failure —
+        most tools write perfectly ordinary output there — and the exit code a
+        moment later is the honest signal.
+        """
+        if not text:
+            return
+        if self.spinner is not None:
+            self.spinner.clear()
+            self.spinner.set_status("Running")
+        ansi.write(ansi.paint(text, "dim"), end="")
+        self._last_was_harness = True
+        self._saw_command_output = True
 
     # ── The model's own output ───────────────────────────────────────────────
     def _on_chunk(self, data: Any) -> None:
@@ -195,6 +242,16 @@ class StreamRenderer:
             self._write_display(str(display), prefix)
             return
 
+        # Already on screen, live. Reprinting the result here would show the
+        # same build twice — once as it happened and once as a preview — and
+        # the preview is the worse copy, because it is the one with the middle
+        # cut out. What is still worth saying is how it ended, which is the one
+        # thing the stream could not tell you.
+        if self._saw_command_output:
+            self._saw_command_output = False
+            _write_gutter(prefix + _exit_line(content), failed=failed)
+            return
+
         if self.verbose:
             body = content
         else:
@@ -326,6 +383,20 @@ RESULT_LINES = 4
 Enough for a shell result — exit code, a line of stdout, a line of stderr —
 and not enough for a grep to bury the conversation it is part of. ctrl+o
 puts back whatever this cut."""
+
+
+def _exit_line(content: str) -> str:
+    """How a streamed command ended, in one line.
+
+    The output is already on screen; what the stream could not say is the exit
+    code, because that only exists once the process is gone. Anything the tool
+    appended after the streams — the timeout advice, in particular — is kept,
+    since it was never streamed and is the part that tells the model (and the
+    reader) what to do next."""
+    lines = [ln for ln in content.splitlines() if ln.strip()]
+    head = next((ln for ln in lines if ln.startswith("exit_code:")), "finished")
+    tail = [ln for ln in lines if ln.startswith(("The limit was", "This command hit"))]
+    return head if not tail else f"{head}\n" + "\n".join(tail)
 
 
 def _preview(content: str) -> str:
