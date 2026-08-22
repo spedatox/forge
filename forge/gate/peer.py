@@ -45,6 +45,17 @@ _HEARTBEAT_S = 30.0
 # fires first so the peer's own logs show WHICH chat went quiet and when (the
 # visibility this class of hang otherwise lacks). It never aborts the run.
 _CHAT_SILENCE_LOG_S = 250.0
+# How often the keepalive checks a quiet stream, and the silence past which it
+# nudges Mark VI's proxy so a legitimately long single tool call (a cold `wpscan`
+# database update, a wide `nuclei` sweep) is not mistaken for a dead turn. It
+# lives WELL under the proxy's 300s idle ceiling: real work resets the clock via
+# `emit`, and when nothing real flows this backfills at ~90s cadence so the gap
+# Mark VI ever sees stays near 2×90s — comfortably inside 300s with margin for
+# jitter. The precise bounds that catch a GENUINE hang (per-command Cell timeout,
+# the tool backstop, the iteration ceiling) all sit BELOW this, so keeping the
+# socket alive here cannot mask a wedged run — it only stops the blunt 300s
+# stream timeout from firing on work that is fine.
+_CHAT_KEEPALIVE_S = 90.0
 # chat_event types Mark VI's ExternalAgentProxy understands (its _EVENT_MAP).
 _CHAT_FORWARD = frozenset({"chunk", "tool", "tool_result", "done", "error",
                            # A delegation's own activity, on its own channel so
@@ -295,6 +306,34 @@ class ForgePeer:
                                extra={"chat_id": chat_id,
                                       "quiet_s": round(quiet, 1)})
 
+    async def _chat_keepalive(self, chat_id: str, last_activity) -> None:
+        """Keep a legitimately-busy stream alive past Mark VI's 300s idle ceiling.
+
+        The proxy's clock resets only when a `chat_event` reaches it, and the run
+        loop produces one only when the model streams text or a tool starts or
+        returns. A single long command (a cold `wpscan` DB update, a wide
+        `nuclei` sweep) makes none of those for its whole duration, so the stream
+        goes silent and Mark VI kills a turn that is working fine — the exact
+        "stopped responding mid-task" the operator sees.
+
+        This backfills a frame while, and only while, real activity is absent:
+        `last_activity` tracks genuine events (never the keepalive itself), so a
+        stream that is actually streaming is never touched, and `_chat_watchdog`
+        still logs true silence for diagnostics. The nudge is an EMPTY `chunk` —
+        a type the proxy already maps and resets on, whose empty payload appends
+        nothing to the answer, so it is invisible to the client."""
+        loop = asyncio.get_running_loop()
+        while True:
+            await asyncio.sleep(_CHAT_KEEPALIVE_S)
+            if loop.time() - last_activity() < _CHAT_KEEPALIVE_S:
+                continue  # real frames are flowing — no nudge needed
+            try:
+                await self._send({
+                    "type": "chat_event", "agent_id": self.cfg.agent_id,
+                    "chat_id": chat_id, "event": {"type": "chunk", "data": ""}})
+            except Exception:  # noqa: BLE001 — socket gone; the run will unwind
+                return
+
     # ── Handlers ─────────────────────────────────────────────────────────────
     async def _handle_task(self, frame: dict[str, Any]) -> None:
         """task_dispatch → run one job, answer with a single task_result."""
@@ -348,16 +387,24 @@ class ForgePeer:
 
         async def emit(ev: JobEvent) -> None:
             nonlocal terminal_seen, last_activity
-            last_activity = asyncio.get_running_loop().time()
             if ev.type not in _CHAT_FORWARD:
                 return
             if ev.type in ("done", "error"):
                 terminal_seen = True
             await self._send({"type": "chat_event", "agent_id": self.cfg.agent_id,
                               "chat_id": chat_id, "event": job_event_to_chat_event(ev)})
+            # Reset the silence clock only on a frame that actually REACHED Mark
+            # VI — its idle counter resets on nothing else. Timestamping every
+            # JobEvent (including the internal ones this filter drops) would read
+            # a burst of non-forwarded events as activity while Mark VI received
+            # nothing and timed out anyway, leaving the keepalive silent through
+            # the exact stall it exists to cover.
+            last_activity = asyncio.get_running_loop().time()
 
         watchdog = asyncio.create_task(
             self._chat_watchdog(chat_id, lambda: last_activity))
+        keepalive = asyncio.create_task(
+            self._chat_keepalive(chat_id, lambda: last_activity))
         try:
             term = await run_job(request, settings=self.settings, registry=self.registry,
                                  emit=emit, signal=signal,
@@ -387,6 +434,7 @@ class ForgePeer:
                 await self._safe_terminal_error(chat_id, f"{type(e).__name__}: {e}")
         finally:
             watchdog.cancel()
+            keepalive.cancel()
             self._chats.pop(chat_id, None)
 
 
