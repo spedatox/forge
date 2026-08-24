@@ -33,6 +33,7 @@ from forge.warden.memory import MemoryReply, RemoteMemory
 from forge.warden.oracle import Answer, ChannelOracle
 from forge.warden.permissions import AllowList
 from forge.gate.runner import run_job
+from forge.gate.cellpool import CellPool
 from forge.warden.state import StopReason
 
 logger = logging.getLogger("forge.gate.peer")
@@ -88,6 +89,12 @@ class ForgePeer:
         self._memory = RemoteMemory(self._send)
         self._ws: Any = None
         self._send_lock = asyncio.Lock()
+        # One live Cell per conversation, kept across its turns so a long turn's
+        # tooling and caches survive a timeout+retry instead of being rebuilt
+        # from the base image every time. Isolation between conversations is
+        # preserved; see forge/gate/cellpool.py. Survives reconnects (the
+        # containers are process-local) and is torn down when the peer stops.
+        self._cellpool = CellPool()
         self._chats: dict[str, asyncio.Event] = {}     # chat_id/task_id → abort signal
         self._work: set[asyncio.Task] = set()
         self._shutdown = False
@@ -116,6 +123,13 @@ class ForgePeer:
 
     def request_stop(self) -> None:
         self._stop.set()
+
+    async def aclose(self) -> None:
+        """Reclaim process-local resources when the peer stops for good. The
+        conversation Cells outlive individual turns and reconnects on purpose,
+        so nothing else frees them — without this, stopping the peer leaks a
+        container per live conversation."""
+        await self._cellpool.close_all()
 
     async def _serve_one(self) -> None:
         import websockets
@@ -417,7 +431,12 @@ class ForgePeer:
                                  # turn is writing; the peer runs several
                                  # conversations over one socket and the frame is
                                  # the only place that can carry the association.
-                                 memory=self._memory.scoped(chat_id))
+                                 memory=self._memory.scoped(chat_id),
+                                 # Reuse this conversation's Cell across its turns
+                                 # (keyed on chat_id inside run_job via job_id) so
+                                 # a timeout+retry keeps the tools and caches the
+                                 # turn already installed. Dispatch stays throwaway.
+                                 cell_pool=self._cellpool)
             if not terminal_seen:
                 # Ensure Mark VI always gets a terminal frame (abort path, etc.).
                 final_type = "done" if term.reason is StopReason.COMPLETED else "error"
@@ -461,7 +480,10 @@ def main() -> int:
                 loop.add_signal_handler(sig, peer.request_stop)
             except (NotImplementedError, OSError):
                 signalmod.signal(sig, lambda *_: peer.request_stop())
-        await peer.run_forever()
+        try:
+            await peer.run_forever()
+        finally:
+            await peer.aclose()
 
     try:
         asyncio.run(_run())

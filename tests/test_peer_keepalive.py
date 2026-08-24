@@ -124,6 +124,7 @@ def _handler_peer(send):
     peer._memory = SimpleNamespace(scoped=lambda chat_id: None)
     peer.extensions = SimpleNamespace(
         tool_providers=lambda: [], fragments=None, hooks=None, bus=None)
+    peer._cellpool = peer_mod.CellPool()
     return peer
 
 

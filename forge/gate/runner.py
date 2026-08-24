@@ -19,6 +19,7 @@ from forge.agents.prompt import PromptFragment, compose_system_prompt
 from forge.agents.registry import AgentRegistry
 from forge.cell.base import CellPolicy
 from forge.cell.factory import build_cell
+from forge.gate.cellpool import CellPool
 from forge.config import ForgeSettings
 from forge import notify
 from forge.gate.events import EventFan
@@ -66,6 +67,7 @@ async def run_job(
     fragments: list[PromptFragment] | None = None,
     event_sinks: list | None = None,
     memory: Any | None = None,
+    cell_pool: "CellPool | None" = None,
 ) -> Terminal:
     """Run one job to a single Terminal, streaming JobEvents via `emit`.
 
@@ -101,18 +103,36 @@ async def run_job(
         env=cfg.git.env(),
     )
 
-    cell = None
-    graph = None
-    providers: list[ToolProvider] = []
-    try:
-        cell = await build_cell(
+    backend = cfg.cell.backend or settings.cell_backend
+    image = cfg.cell.image or settings.cell_image
+
+    async def _build_cell() -> Any:
+        return await build_cell(
             agent_id=cfg.agent_id,
             workspace_root=settings.workspace_root,
-            backend=cfg.cell.backend or settings.cell_backend,
-            image=cfg.cell.image or settings.cell_image,
+            backend=backend,
+            image=image,
             policy=policy,
             workspace=repo_path,
         )
+
+    cell = None
+    cell_pooled = False
+    graph = None
+    providers: list[ToolProvider] = []
+    try:
+        if cell_pool is not None:
+            # Reuse this conversation's Cell across its turns (and retries), so a
+            # long turn that timed out does not throw away the tools and caches
+            # it installed. The signature is everything a reused container must
+            # match — a changed cwd or resource policy forces a clean rebuild.
+            sig = (cfg.agent_id, backend, image,
+                   str(repo_path) if repo_path else "",
+                   policy.allow_network, policy.cpus, policy.memory_mb,
+                   policy.pids_limit, policy.run_as_root, tuple(policy.cap_add))
+            cell, cell_pooled = await cell_pool.acquire(request.job_id, sig, _build_cell)
+        else:
+            cell = await _build_cell()
 
         # Graphify sidecar over the job's repo — Warden-side, indexed once (§5).
         if repo_path is not None:
@@ -271,7 +291,13 @@ async def run_job(
         if graph is not None:
             await graph.close()
         if cell is not None:
-            await cell.close()
+            # A pooled Cell is returned to the pool (kept alive for the next turn
+            # of this conversation, or closed there if it was a throwaway); an
+            # unpooled one is torn down here as before.
+            if cell_pool is not None:
+                await cell_pool.release(request.job_id, cell, cell_pooled)
+            else:
+                await cell.close()
 
 
 def _build_model(model_ref: str, settings: ForgeSettings, max_tokens: int) -> Model:
