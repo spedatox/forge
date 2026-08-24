@@ -214,6 +214,27 @@ jobs:
             # nothing has changed.
             .venv/bin/python -m pip install -q -e ".[providers]"
 
+            # The per-agent Cell images are the same class of "undocumented
+            # server state" this pipeline exists to end: a lab image built once
+            # by hand drifts, and a rebuilt host has none — which surfaces only
+            # at job time as `Unable to find image 'forge-cell-optimus:latest'`,
+            # long after a green deploy. Build them here from the version-
+            # controlled Dockerfiles so main is the single source of truth and a
+            # fresh host works on the first job. Docker's layer cache makes an
+            # unchanged image a near-instant no-op, so this is cheap on the
+            # common deploy where nothing about the image changed.
+            #
+            # No sudo: the deploy account must be able to run docker directly
+            # (in the `docker` group). If this step fails with a permission
+            # error, that group membership is missing — add it once on the host
+            # with `sudo usermod -aG docker <deploy-user>` and re-run. Fatal on
+            # purpose: a Cell image that failed to build is a peer that will fail
+            # every job, and finding that out now beats finding it out mid-turn.
+            docker build -f deploy/cell-optimus.Dockerfile \
+              -t forge-cell-optimus:latest deploy/
+            docker build -f deploy/cell-centurion.Dockerfile \
+              -t forge-cell-centurion:latest deploy/
+
             # The unit file is version-controlled. Sync it only when it
             # actually differs, so an unchanged deploy does not daemon-reload.
             # Every root action below is spelled out verbatim because
