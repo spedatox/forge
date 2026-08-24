@@ -101,6 +101,14 @@ class AnthropicModel:
         self.model_id = model_id
         self.max_tokens = max_tokens
 
+    async def close(self) -> None:
+        """Release the SDK client's connection pool. Without this the client
+        (and the httpx pool underneath it) is reclaimed only by GC, which for an
+        async client means a teardown that runs after the loop has moved on —
+        the "generator didn't stop after athrow()" noise a job otherwise leaves
+        in the logs on every run."""
+        await self._client.close()
+
     async def stream(self, *, system: str, messages: list[dict[str, Any]],
                      tools: list[dict[str, Any]], signal: asyncio.Event
                      ) -> AsyncIterator[ModelEvent]:

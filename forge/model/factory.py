@@ -91,6 +91,22 @@ class _FallbackModel:
         self._settings = settings
         self._max_tokens = max_tokens
         self.model_id = chain[0]
+        # Every ref that reaches _build_single, win or lose, gets its own SDK
+        # client and connection pool — a chain of three tried on an outage opens
+        # three. None of that is closed by returning from `stream`: the losers'
+        # clients would otherwise be reclaimed only by GC, and the winner's sub
+        # lives only in this generator's local frame. `close()` sweeps all of them.
+        self._built: list[Any] = []
+
+    async def close(self) -> None:
+        for sub in self._built:
+            closer = getattr(sub, "close", None)
+            if closer is None:
+                continue
+            try:
+                await closer()
+            except Exception:  # noqa: BLE001 — best-effort; one bad client must not block the rest
+                logger.warning("model_close_failed", extra={"ref": getattr(sub, "model_id", "?")})
 
     async def stream(self, *, system: str, messages: list[dict[str, Any]],
                      tools: list[dict[str, Any]], signal: asyncio.Event
@@ -99,6 +115,7 @@ class _FallbackModel:
         for ref in self._chain:
             try:
                 sub = _build_single(ref, self._settings, self._max_tokens)
+                self._built.append(sub)
             except Exception as e:  # noqa: BLE001 — e.g. missing key; try the next
                 last_exc = e
                 logger.warning("model_build_failed", extra={"ref": ref, "error": str(e)})

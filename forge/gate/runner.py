@@ -120,6 +120,9 @@ async def run_job(
     cell_pooled = False
     graph = None
     providers: list[ToolProvider] = []
+    model_owned = False   # set for real just before the model is resolved below;
+                           # initialized here so a failure earlier in `try` still
+                           # leaves `finally` a defined name to check.
     try:
         if cell_pool is not None:
             # Reuse this conversation's Cell across its turns (and retries), so a
@@ -156,6 +159,10 @@ async def run_job(
         # One number: what a turn may produce is also what the ledger holds back
         # for the compaction call. If these drifted apart, compaction would
         # trigger with either too little room to finish or more than it needs.
+        # Ownership matters for teardown: a model THIS call builds, it must also
+        # close; a model the caller injected (tests, the demo's ScriptedModel)
+        # is the caller's to keep alive or discard, so it is left untouched.
+        model_owned = model is None
         model = model or _build_model(model_ref, settings, settings.max_tokens)
 
         # Seam 1: tools arrive by folding an ordered provider list. The builtin
@@ -287,6 +294,21 @@ async def run_job(
         await out("error", f"{type(e).__name__}: {e}")
         return Terminal(reason=StopReason.ERROR, error=f"{type(e).__name__}: {e}")
     finally:
+        # A model this call built holds a real SDK client (an httpx connection
+        # pool underneath); left unclosed it is reclaimed only by GC, at a time
+        # the event loop does not control — the "generator didn't stop after
+        # athrow()" noise a job otherwise leaves in the logs on every run, and,
+        # in the fallback-chain case, one leaked pool per ref tried, on every
+        # single turn. `close` is a capability, not every Model's obligation
+        # (a ScriptedModel has no client to release), so it is checked, not
+        # assumed.
+        if model_owned and model is not None:
+            closer = getattr(model, "close", None)
+            if closer is not None:
+                try:
+                    await closer()
+                except Exception:  # noqa: BLE001 — teardown is best-effort
+                    logger.warning("model_close_failed", extra={"job_id": request.job_id})
         await close_providers(providers)
         if graph is not None:
             await graph.close()
