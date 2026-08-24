@@ -42,8 +42,11 @@ class ReadFile(Tool):
         "(read-before-write). Output is line-numbered, which is what makes edit_file's "
         f"exact-match anchoring reliable and composes with grep's path:line output. Reads "
         f"up to {DEFAULT_LINE_LIMIT} lines by default; pass offset and limit to read a "
-        "window of a larger file, so no file is ever too big to work with. Read-only and "
-        "safe to run in parallel."
+        "window of a larger file, so no file is ever too big to work with. A file under "
+        "the default limit is read whole in one call — after a grep hit, check the "
+        "file's size before windowing around its line number; a guessed offset/limit "
+        "often costs a second call for content the first call already had. Read-only "
+        "and safe to run in parallel."
     )
     Args = ReadFileArgs
     READ_ONLY = True
