@@ -46,6 +46,19 @@ class JobRequest(BaseModel):
     # backend's DB is the source of truth for it exactly as it is for history.
     # Empty for a dispatch, or from a Mark VI too old to send it.
     memory_block: str = ""
+    # True for a task_dispatch, False for a chat_request — the one distinction
+    # Forge can actually observe on the wire. Mark VI has its own blocking-vs-
+    # background split for a dispatch (`dispatch()` awaits inline, `spawn()`
+    # fires and wakes the caller later), but that split is never on the wire
+    # frame (`{type, task_id, from, task, cwd, permission_mode}` — see
+    # `job_from_task_dispatch`), so Forge cannot and should not guess at it.
+    # What IS true of every task_dispatch, blocking or not, is that nothing on
+    # THIS end of the socket is a live human who can answer a follow-up
+    # question in the next few seconds — chat_request is the only frame with
+    # one of those. `run_job` uses this to warn the model rather than let it
+    # assume a chat's live-operator affordances (ask_operator answered
+    # promptly, a chance to clarify) apply here too.
+    unattended: bool = False
 
 
 class JobEvent(BaseModel):
@@ -68,6 +81,7 @@ def job_from_task_dispatch(frame: dict[str, Any], agent_id: str) -> JobRequest:
             max_iterations=None,
         ),
         job_id=str(frame.get("task_id", uuid.uuid4().hex)),
+        unattended=True,
     )
 
 

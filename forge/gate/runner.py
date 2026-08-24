@@ -48,6 +48,36 @@ from forge.warden.transcript import repair_transcript
 
 logger = logging.getLogger("forge.gate")
 
+# For an unattended job (request.unattended — see protocol.py), the agent's own
+# final answer is the only thing that reaches the owner: there is no live
+# operator to catch a vague summary, answer a mid-task question promptly, or
+# notice a deliverable left sitting in a workspace that will not survive past
+# this job. Every chat turn already has good instincts about clarity and
+# verification; this fragment only says what changes when nobody is watching.
+_UNATTENDED_FRAGMENT = PromptFragment("unattended", (
+    "This job was DISPATCHED, not chatted with — there is no operator watching "
+    "this turn who can clarify or answer a question in the next few minutes. "
+    "Two things follow:\n\n"
+    "1. Your final answer is the ONLY report the owner gets. Make it stand on "
+    "its own: what you did, where any result lives, how to run or verify it, "
+    "and anything you assumed or left undone. A summary that only makes sense "
+    "to someone who watched you work is not good enough here.\n"
+    "2. ask_operator may go unanswered and time out. Use it only for something "
+    "genuinely blocking; otherwise make the most reasonable assumption, state "
+    "it plainly in your final answer, and keep going rather than stalling on a "
+    "question nobody is there to answer.\n\n"
+    "If you produce a deliverable worth keeping — a build, an export, a report "
+    "— and the vault tools are available, deposit it there rather than leaving "
+    "it only in the workspace, and say where it landed.\n\n"
+    "None of this lowers the bar on verification — if anything it raises it: "
+    "when a claim rests on evidence you could not fully confirm (a deposit that "
+    "reported success but that you could not independently list, a check you "
+    "could not run), say so exactly as plainly as you would in a live "
+    "conversation. Nobody here will ask a follow-up to catch an overclaim, so "
+    "state your confidence level honestly rather than compensating for the "
+    "silence with a more certain-sounding report than the evidence supports."
+))
+
 EmitEvent = Callable[[JobEvent], Awaitable[None]]
 
 
@@ -225,6 +255,7 @@ async def run_job(
             PromptFragment("profile", cfg.system_prompt),
             *([owner_fragment] if owner_fragment else []),
             *([repo_conventions] if repo_conventions else []),
+            *([_UNATTENDED_FRAGMENT] if request.unattended else []),
             *(fragments or []),
         ])
 
