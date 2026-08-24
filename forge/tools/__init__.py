@@ -14,6 +14,7 @@ from forge.tools.files import ReadFile, WriteFile, EditFile
 from forge.tools.graph import GraphQuery, GraphPath, GraphOverview, GraphIndex
 from forge.tools.hisar import HisarDeposit, HisarList, HisarRead
 from forge.tools.memory import Memory
+from forge.tools.owner_notes import RememberAboutOwner
 from forge.tools.search import Grep, Glob
 from forge.tools.task import TaskTool
 from forge.tools.telegram import TelegramSend
@@ -57,6 +58,13 @@ ASK_TOOLS = [AskOperator]
 # there is no channel to Mark VI, so the standalone TUI never sees it.
 MEMORY_TOOLS = [Memory]
 
+# remember_about_owner is deliberately NOT in MEMORY_TOOLS: that group is
+# stripped whenever there is no channel to Mark VI (toolsource.without_memory_tools),
+# and offline is exactly the case this tool exists for — it queues locally and
+# needs no channel at all. Listed individually in ALL_TOOLS instead, so a
+# profile takes it by name rather than inheriting it through a group built
+# around the opposite assumption.
+
 # Reusable tool groups, referenced by agent configs via their allowlist (§2).
 # todo_write is in the coding group rather than its own: a plan is not an
 # optional capability for multi-step work, it is what keeps it coherent.
@@ -78,11 +86,12 @@ ALL_TOOLS = {cls.name: cls for cls in [
     GraphQuery, GraphPath, GraphOverview, GraphIndex, Diagnostics, WebSearch, WebFetch, TodoWrite,
     EnterWorktree, ExitWorktree, TaskTool, ClaudeCode,
     HisarList, HisarRead, HisarDeposit, TelegramSend, AskOperator,
-    Memory,
+    Memory, RememberAboutOwner,
 ]}
 
 __all__ = ["ALL_TOOLS", "NAV_TOOLS", "CODING_TOOLS", "SECURITY_TOOLS", "WEB_TOOLS",
            "HISAR_TOOLS", "NOTIFY_TOOLS", "ASK_TOOLS", "MEMORY_TOOLS", "Memory",
+           "RememberAboutOwner",
            "RunCommand", "ReadFile", "WriteFile", "EditFile", "Grep", "Glob",
            "GraphQuery", "GraphPath", "GraphOverview", "GraphIndex", "Diagnostics", "WebSearch", "WebFetch",
            "TodoWrite", "EnterWorktree", "ExitWorktree", "TaskTool", "ClaudeCode",

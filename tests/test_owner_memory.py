@@ -14,6 +14,7 @@ obviously missing information, and a confident wrong answer is not.
 """
 from __future__ import annotations
 
+import asyncio
 import datetime as _dt
 
 import pytest
@@ -94,12 +95,14 @@ def test_the_offline_fragment_says_it_is_a_snapshot():
     assert "out of date" in text
 
 
-def test_the_offline_fragment_says_nothing_written_here_reaches_mark_vi():
-    """Peer-only is the architecture: an offline session is its own session and
-    is imported, never merged. The agent has to know that before it promises
-    the owner it will 'remember' something."""
+def test_the_offline_fragment_says_remember_about_owner_still_works():
+    """The snapshot itself is still read-only, but the agent has a real
+    write-back path now (`remember_about_owner`, queued locally) — the header
+    must say so rather than claim offline writes are impossible."""
     owner_memory.remember(BLOCK)
-    assert "until this session is imported" in owner_memory.offline_fragment().text
+    text = owner_memory.offline_fragment().text
+    assert "remember_about_owner" in text
+    assert "next time this peer connects" in text
 
 
 def test_the_snapshot_is_dated_in_words():
@@ -160,3 +163,102 @@ def test_an_unwritable_home_does_not_fail_the_turn(monkeypatch):
 def test_the_snapshot_is_per_user_not_per_repository():
     """It describes the owner, who is the same person in every repo."""
     assert owner_memory.snapshot_path().name == owner_memory.SNAPSHOT_NAME
+
+
+# ── The write-back path: queue locally, flush on reconnect ──────────────────
+
+
+class _FakeChannel:
+    """A MemoryChannel stand-in — records every payload it was asked to send
+    and answers however the test tells it to, without a socket."""
+
+    def __init__(self, replies=None):
+        self.sent: list[dict] = []
+        self._replies = list(replies) if replies is not None else None
+
+    async def command(self, payload):
+        from forge.warden.memory import MemoryReply
+
+        self.sent.append(payload)
+        if self._replies is not None:
+            return self._replies.pop(0)
+        return MemoryReply(True, "recorded")
+
+
+def test_queue_observation_needs_no_channel_at_all():
+    """The entire point: this works in a run with no connection to Mark VI."""
+    owner_memory.queue_observation("He prefers concise answers.")
+
+    raw = owner_memory.pending_path().read_text(encoding="utf-8")
+    assert "concise answers" in raw
+    assert '"level": "explicit"' in raw
+    assert '"domain": "state"' in raw
+
+
+@pytest.mark.parametrize("empty", ["", "   ", None])
+def test_an_empty_note_is_not_queued(empty):
+    owner_memory.queue_observation(empty)
+    assert not owner_memory.pending_path().exists()
+
+
+def test_a_domain_can_be_named():
+    owner_memory.queue_observation("Born in Izmir.", domain="biography")
+    assert '"domain": "biography"' in owner_memory.pending_path().read_text(encoding="utf-8")
+
+
+def test_no_pending_file_means_flush_is_a_quiet_noop():
+    sent = asyncio.run(owner_memory.flush_pending(_FakeChannel()))
+    assert sent == 0
+
+
+def test_flush_sends_every_queued_line_and_empties_the_queue():
+    owner_memory.queue_observation("First fact.")
+    owner_memory.queue_observation("Second fact.", domain="biography")
+    channel = _FakeChannel()
+
+    sent = asyncio.run(owner_memory.flush_pending(channel))
+
+    assert sent == 2
+    assert [p["content"] for p in channel.sent] == ["First fact.", "Second fact."]
+    assert all(p["skill"] == "record_observation" for p in channel.sent)
+    assert not owner_memory.pending_path().exists()
+
+
+def test_a_line_mark_vi_could_not_run_stays_queued():
+    """ok=False means the command never ran (peer_memory.py's contract) — that
+    is the one case worth retrying, unlike a refusal Mark VI actually ran."""
+    from forge.warden.memory import MemoryReply
+
+    owner_memory.queue_observation("Will retry me.")
+    channel = _FakeChannel(replies=[MemoryReply(False, "the connection dropped")])
+
+    sent = asyncio.run(owner_memory.flush_pending(channel))
+
+    assert sent == 0
+    assert "Will retry me" in owner_memory.pending_path().read_text(encoding="utf-8")
+
+
+def test_a_refusal_mark_vi_actually_ran_is_not_retried():
+    """ok=True means it ran, even if what ran was a refusal — that counts as
+    resolved (peer_memory.py's own contract), and the line is dropped exactly
+    like a successful record. Retrying a refusal would only produce the same
+    refusal again."""
+    from forge.warden.memory import MemoryReply
+
+    owner_memory.queue_observation("Refused for some reason.")
+    channel = _FakeChannel(replies=[MemoryReply(True, "refused: not your document")])
+
+    sent = asyncio.run(owner_memory.flush_pending(channel))
+
+    assert sent == 1
+    assert not owner_memory.pending_path().exists()
+
+
+def test_a_corrupted_line_is_dropped_not_retried_forever():
+    owner_memory.pending_path().parent.mkdir(parents=True, exist_ok=True)
+    owner_memory.pending_path().write_text("not json\n", encoding="utf-8")
+
+    sent = asyncio.run(owner_memory.flush_pending(_FakeChannel()))
+
+    assert sent == 0
+    assert not owner_memory.pending_path().exists()

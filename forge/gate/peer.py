@@ -5,9 +5,11 @@ the backend's existing protocol:
 
     → agent_register (agent_id, capabilities, model_preference, host/platform/roots)
     → heartbeat (periodic)
+    → memory_request {skill: record_observation, ...}  → queued facts, flushed on connect
     ← task_dispatch {task_id, from, task, cwd}     → run one job → task_result
     ← chat_request  {chat_id, history, cwd, ...}   → run one job → chat_event stream
     ← chat_cancel   {chat_id}                       → abort that run
+    ← owner_memory_sync {block}                     → refresh the local memory snapshot
     ← shutdown                                      → stop, no reconnect
 
 The peer carries no identity of its own — `cfg` is whichever AgentConfig it was
@@ -23,6 +25,7 @@ import logging
 import uuid
 from typing import Any
 
+from forge.agents import owner_memory
 from forge.agents.config import AgentConfig
 from forge.gate import host
 from forge.config import ForgeSettings
@@ -146,6 +149,12 @@ class ForgePeer:
                 await self._register()
                 logger.info("peer_registered",
                             extra={"agent": self.cfg.agent_id, "url": self.settings.speda_ws_url})
+                # Whatever this peer queued locally while nobody was listening
+                # (remember_about_owner, offline) goes out now — reconnecting
+                # is the only signal this module has that Mark VI can hear it
+                # again, so it does not wait for a heartbeat or a job to carry
+                # it incidentally.
+                self._spawn(self._flush_pending_observations())
                 hb = asyncio.create_task(self._heartbeat())
                 # The receive loop parks on ws.recv() and only returns when the
                 # socket closes, so waiting on it alone leaves a stop request
@@ -220,6 +229,23 @@ class ForgePeer:
             except Exception:  # noqa: BLE001 — the receive loop owns the disconnect
                 return
 
+    async def _flush_pending_observations(self) -> None:
+        """Replay whatever remember_about_owner queued while disconnected.
+
+        Best-effort like everything else touching this file: a flush that
+        fails leaves the queue exactly as it was (owner_memory.flush_pending
+        only drops a line once Mark VI actually ran it), so the next
+        reconnect tries again. Never lets a bad flush take the connection
+        down with it.
+        """
+        try:
+            sent = await owner_memory.flush_pending(self._memory)
+        except Exception as e:  # noqa: BLE001 — a flush failure is not a peer failure
+            logger.debug("owner_memory_flush_error", extra={"error": repr(e)})
+            return
+        if sent:
+            logger.info("owner_memory_flushed", extra={"sent": sent})
+
     async def _receive_loop(self) -> None:
         async for raw in self._ws:
             try:
@@ -258,6 +284,15 @@ class ForgePeer:
             ask_id = str(frame.get("ask_id", ""))
             if not self._oracle.answer(ask_id, str(frame.get("text", ""))):
                 logger.info("question_response_unmatched", extra={"ask_id": ask_id})
+        elif ftype == "owner_memory_sync":
+            # Additive frame (law 3), unsolicited: Orion pushes this once a
+            # night, unprompted, after recomposing owner.md/current.md (see
+            # app/skills/forge_sync.py on Mark VI's side). No request_id to
+            # correlate — this refreshes the same on-disk snapshot the live
+            # per-turn `memory_block` already writes, so the offline TUI is
+            # never more than one audit cycle behind even on a night this
+            # peer ran no connected job at all.
+            owner_memory.remember(str(frame.get("block", "")))
         elif ftype == "memory_response":
             # Mark VI's answer to one memory command. `ok` is carried explicitly
             # rather than inferred from the presence of text: a `delete` that

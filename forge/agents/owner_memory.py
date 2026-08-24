@@ -1,6 +1,7 @@
 """What Mark VI knows about the owner, and what survives losing Mark VI.
 
-Two jobs, deliberately in one place because the second is a cache of the first.
+Three jobs, deliberately in one place because the second and third are both
+built on the same disk cache as the first.
 
 **Connected.** Every `chat_request` carries the same memory block Mark VI puts
 into its own agents' system prompts. Before that was sent, an external peer ran
@@ -16,33 +17,55 @@ but it means an unreachable backend leaves the hands with nothing driving them.
 
 So each block that arrives is written to disk, and the standalone TUI loads the
 most recent one. That is a countermeasure, not a second brain: it is explicitly
-a SNAPSHOT, labelled with its age, and it is never written back to. An offline
-session is its own session and is imported to Mark VI as a new one — nothing
-merges silently, because a memory that quietly forks is worse than one that is
-briefly absent.
+a SNAPSHOT, labelled with its age, and the snapshot file itself is never
+written back to. Orion also pushes a fresh copy here once a night, unprompted
+(`owner_memory_sync`, see forge/gate/peer.py), so the snapshot is never more
+than one audit cycle stale even on a night this peer never ran a connected job.
+
+**The one write-back path.** A session captures something about the owner
+worth keeping (`queue_observation`) into a SEPARATE local file — the snapshot
+above stays read-only. Queuing needs no connection at all; what reaches Mark VI
+and when is `flush_pending`'s job, run once this peer is connected again. This
+is still one-way in spirit: nothing here decides whether the fact survives,
+merges with something else, or contradicts an existing one — that judgement
+happens on Mark VI's side, in Orion's own audit, on its own schedule. Nothing
+merges silently here, because a memory that quietly forks is worse than one
+that is briefly absent.
 """
 from __future__ import annotations
 
 import datetime as _dt
+import json
 import logging
 import os
 from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
 SNAPSHOT_NAME = "owner_memory.md"
+PENDING_NAME = "pending_observations.jsonl"
 
 # Guards the prompt against a runaway memory file. Mark VI already bounds what
 # it preloads; this is a second fence, not the primary one.
 MAX_CHARS = 24_000
 
 
+def _home() -> Path:
+    root = os.environ.get("FORGE_HOME")
+    return Path(root) if root else Path.home() / ".forge"
+
+
 def snapshot_path() -> Path:
     """Where the snapshot lives. Per-user, not per-workspace: it describes the
     owner, who is the same person in every repository they open."""
-    root = os.environ.get("FORGE_HOME")
-    base = Path(root) if root else Path.home() / ".forge"
-    return base / SNAPSHOT_NAME
+    return _home() / SNAPSHOT_NAME
+
+
+def pending_path() -> Path:
+    """Where locally-queued, not-yet-sent observations live. Same per-user
+    scope as the snapshot, for the same reason."""
+    return _home() / PENDING_NAME
 
 
 def remember(block: str) -> None:
@@ -122,8 +145,95 @@ def offline_fragment():
         f"of the owner's memory, {_age(stamp)}. Treat it as background that may "
         f"be out of date rather than as current fact, and do not claim to have "
         f"checked anything in it. You cannot read or write the owner's memory "
-        f"in this mode; nothing you learn here will reach Mark VI until this "
-        f"session is imported."
+        f"files in this mode — but `remember_about_owner` still works: it queues "
+        f"a note locally and it reaches Mark VI the next time this peer "
+        f"connects, without waiting on a session import."
     )
     return PromptFragment(
         "owner memory (offline snapshot)", f"{header}\n\n{body[:MAX_CHARS]}")
+
+
+def queue_observation(content: str, *, domain: str = "state", level: str = "explicit") -> None:
+    """Queue one fact about the owner locally — no connection required.
+
+    Best-effort exactly like `remember()`: a note that fails to write is lost
+    rather than blocking whatever noticed it, the same trade this module
+    already makes for the read-side cache. Append-only; `flush_pending` is the
+    only thing that ever removes a line.
+    """
+    text = (content or "").strip()
+    if not text:
+        return
+    entry = {
+        "content": text,
+        "level": level,
+        "domain": domain,
+        "queued_at": _dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+    }
+    try:
+        path = pending_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except OSError as e:
+        logger.debug("owner_memory_queue_write_failed: %s", e)
+
+
+async def flush_pending(channel: Any) -> int:
+    """Replay every queued observation through `channel` (a MemoryChannel),
+    keeping only the lines that were not actually recorded.
+
+    Called right after this peer reconnects (forge/gate/peer.py), so a note
+    captured fully offline reaches Mark VI's record the next time anyone is
+    listening, rather than waiting on a session import that may never happen.
+    Returns how many were sent successfully.
+
+    `ok=False` on the reply means the command could not run at all (per
+    peer_memory.py's contract) — that line stays queued for the next flush.
+    `ok=True` means Mark VI's side ran it, even if what ran was a refusal;
+    retrying a refusal changes nothing, so that line is dropped either way.
+    """
+    path = pending_path()
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return 0
+    lines = [line for line in raw.splitlines() if line.strip()]
+    if not lines:
+        return 0
+
+    sent = 0
+    remaining: list[str] = []
+    for line in lines:
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue  # a corrupted line is dropped, not retried forever
+        payload = {
+            "skill": "record_observation",
+            "content": entry.get("content", ""),
+            "level": entry.get("level", "explicit"),
+            "domain": entry.get("domain", "state"),
+        }
+        try:
+            reply = await channel.command(payload)
+        except Exception as e:  # noqa: BLE001 — a bad flush must not lose the line
+            logger.debug("owner_memory_flush_failed: %s", e)
+            remaining.append(line)
+            continue
+        if reply.ok:
+            sent += 1
+        else:
+            remaining.append(line)
+
+    try:
+        if remaining:
+            path.write_text("\n".join(remaining) + "\n", encoding="utf-8")
+        else:
+            path.unlink(missing_ok=True)
+    except OSError as e:
+        logger.debug("owner_memory_queue_rewrite_failed: %s", e)
+
+    if sent:
+        logger.info("owner_memory_flushed", extra={"sent": sent, "remaining": len(remaining)})
+    return sent

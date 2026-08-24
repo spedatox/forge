@@ -21,7 +21,12 @@ model = "deepseek:deepseek-v4-pro"
 #
 # All four are withheld automatically when the deployment has no vault token / bot
 # / Mark VI channel, so naming them is not a claim that they are configured.
-tools = ["security", "hisar", "web", "memory", "notify"]
+#
+# "remember_about_owner" — named individually, not via "memory": it queues a
+# note about the operator LOCALLY with no connection required, so it stays
+# available in exactly the run where "memory" gets withheld. See
+# forge/tools/owner_notes.py.
+tools = ["security", "hisar", "web", "memory", "notify", "remember_about_owner"]
 
 # One working mode with the safety gate always on; "plan" would make it
 # read-only for reviewing an intended engagement before it runs (§6).
