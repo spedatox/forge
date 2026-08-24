@@ -93,8 +93,23 @@ jobs:
         shell: powershell
         run: .\install.ps1 -NoVenv -Extras dev
 
-      - name: The installed Forge runs a real turn
-        run: python -m forge demo
+      # Bare `python` is not trustworthy here: windows-latest ships several
+      # Python installs, and the interpreter install.ps1/install.sh actually
+      # put packages into (FORGE_PY, written to $GITHUB_ENV by both scripts)
+      # can differ from whatever `python` resolves to in this fresh step. That
+      # gap is exactly how "pip install succeeded" two steps up turned into
+      # "ModuleNotFoundError: pydantic" here — the install was real, it just
+      # landed in an interpreter this step never asked for.
+      - name: The installed Forge runs a real turn (Linux)
+        if: runner.os != 'Windows'
+        run: |
+          "$FORGE_PY" -m forge demo
+
+      - name: The installed Forge runs a real turn (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          & $env:FORGE_PY -m forge demo
 
   deploy:
     name: Deploy to the execution host

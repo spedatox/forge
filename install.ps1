@@ -138,6 +138,18 @@ if ($NoVenv) {
     Say $py
 }
 
+# Under -NoVenv, $py is whichever candidate Test-Interpreter resolved — on
+# Windows that can legitimately differ from what a bare `python` means in the
+# NEXT shell (the runner image ships several 3.x installs, and the `py`
+# launcher's version table does not always agree with PATH order). A later CI
+# step that assumes `python -m forge demo` means the same interpreter this
+# script just installed into is exactly how "ModuleNotFoundError: pydantic"
+# happened with a green install log two steps above it. Recording the exact
+# path lets a workflow step ask for THIS interpreter instead of guessing.
+if ($env:GITHUB_ENV) {
+    Add-Content -Path $env:GITHUB_ENV -Value "FORGE_PY=$py"
+}
+
 # ── 3. Install ───────────────────────────────────────────────────────────────
 Step "Installing dependencies"
 & $py -m pip install --upgrade --quiet pip

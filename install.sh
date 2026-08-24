@@ -77,6 +77,13 @@ else
     say "$py"
 fi
 
+# Same reasoning as install.ps1's equivalent line: record the exact
+# interpreter this install used, so a CI step that runs afterward can ask for
+# THIS one instead of trusting bare `python`/`python3` to still mean it.
+if [ -n "${GITHUB_ENV:-}" ]; then
+    echo "FORGE_PY=$py" >> "$GITHUB_ENV"
+fi
+
 # ── 3. Install ───────────────────────────────────────────────────────────────
 step "Installing dependencies"
 # PEP 668: a distro-managed interpreter refuses to be installed into at all,
