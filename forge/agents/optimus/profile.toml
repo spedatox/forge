@@ -112,7 +112,28 @@ max_iterations = 400
 allow_network = true
 cpus = 2.0
 memory_mb = 2048
-timeout_s = 120
+# A dev turn's slowest single commands are the install and the test run — a cold
+# `npm install`, `uv pip install`, or a full suite routinely runs past a
+# question-answering agent's budget. 300s (matching Centurion's scanning box)
+# keeps those from being killed mid-work and reported as a broken machine; the
+# per-command timeout is raisable per call up to the Cell ceiling when a job
+# genuinely needs longer.
+timeout_s = 300
+# Optimus's baked dev lab — a per-agent override that wins over the process-wide
+# FORGE_CELL_IMAGE, so no .env change is needed. Build it from
+# deploy/cell-optimus.Dockerfile (Python/Node/Go + build tools). Ignored under
+# the subprocess backend (Docker-less host), where commands use the host's own
+# toolchain instead.
+image = "forge-cell-optimus:latest"
+# Root in the Cell, same as Centurion: the Cell is a throwaway, per-job,
+# network-isolated-from-the-host container, so uid 0 inside it is contained by
+# the container boundary, not by the account. It means a dev job can apt-get a
+# package the bake didn't cover, install a global toolchain, or write outside
+# the workspace during a build — the routine tools are still baked so the common
+# case pays nothing, but "anything it might need" no longer stops at what a
+# non-root user can reach. No cap_add: dev work needs root's filesystem/install
+# reach, not raw-socket or net-admin capabilities (those stay dropped).
+run_as_root = true
 # backend = "docker"   # optional per-agent override of FORGE_CELL_BACKEND
 
 # Who git records for work this agent does. Committing under the operator's

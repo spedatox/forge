@@ -64,14 +64,28 @@ FORGE_WORKSPACE_ROOT=/opt/hisar/vault/Forge/workspaces
 
 `SPEDA_WS_URL` is not set here either — the unit derives it per agent.
 
-Per-agent overrides go in `.env.<agent>` (optional, loaded last). That is the
-only way to vary the Cell image per agent, since `FORGE_CELL_IMAGE` is global
-settings rather than a profile field:
+Per-agent overrides go in `.env.<agent>` (optional, loaded last) for env-level
+settings. The Cell IMAGE, though, is a profile field (`[cell].image`), and a
+value there wins over the global `FORGE_CELL_IMAGE` — so an agent that needs its
+own toolchain names its image in its profile and needs no `.env.<agent>` at all.
 
-```ini
-# .env.centurion — its profile wants security tooling in the Cell
-FORGE_CELL_IMAGE=ghcr.io/…/forge-cell-security:latest
+Two agents ship a baked lab image, each built from a Dockerfile in this folder.
+Both run their Cell as root (a throwaway, per-job, host-isolated container), so
+the bake only covers the routine toolchain — anything else the job `apt-get`s at
+job time:
+
+```bash
+cd /opt/forge-mk1
+# Centurion — headless Kali security toolbox
+docker build -f deploy/cell-centurion.Dockerfile -t forge-cell-centurion:latest deploy/
+# Optimus — polyglot dev lab (Python/Node/Go + build tools)
+docker build -f deploy/cell-optimus.Dockerfile   -t forge-cell-optimus:latest   deploy/
 ```
+
+The tags match what each profile's `[cell].image` already points at, so once
+built they are picked up with no further config. Rebuild after changing a
+Dockerfile; under the subprocess backend (Docker-less host) the images are
+ignored and commands use the host's own tools.
 
 The workspace root inside the Hisar vault is the whole of the placement plan's
 passive H4 layer: live Cell workspaces are browsable on the web desktop with no
