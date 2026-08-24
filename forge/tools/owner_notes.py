@@ -8,14 +8,16 @@ connection at all. It writes one line to a local queue
 (forge/agents/owner_memory.py's `pending_observations.jsonl`) and returns
 immediately; nothing here talks to Mark VI.
 
-**One-way, and it says so.** The queued line reaches Mark VI's memory the next
-time this peer connects (flushed in forge/gate/peer.py right after
-`_register()`), where Orion reviews it in its own nightly audit alongside
-every other agent's observations — there is no read-back, no confirmation
-that it "took", and no way for this or any later session to see it again
-through this tool. That is intentional: deciding what a fact means, whether
-it merges with something already known, or whether it contradicts an existing
-one is Mark VI's job, not a queue's.
+**One-way, and it says so.** If this peer is connected right now (`ctx.memory`
+is live), the queue is flushed immediately after — no reason to make an
+already-open channel wait for a future reconnect. If not, the line waits for
+`forge/gate/peer.py` to flush it right after the next `_register()`. Either
+way there is no read-back and no way for this or any later session to see it
+again through this tool: deciding what a fact means, whether it merges with
+something already known, or whether it contradicts an existing one is Mark
+VI's job, not a queue's — this only ever reports that Mark VI RAN the
+command, per peer_memory.py's own ok/refusal distinction, never what it
+decided.
 """
 from __future__ import annotations
 
@@ -44,12 +46,13 @@ class RememberAboutOwner(Tool):
         "works with or without a connection right now, unlike the `memory` tool. Use it "
         "when something worth keeping emerges in a session: a stated preference, a "
         "constraint, a decision, something true of his life at the moment. It is captured "
-        "locally and immediately; it reaches Mark VI's memory (and Orion's own review) the "
-        "next time this peer connects. Do NOT expect it to be searchable or visible "
-        "anywhere in THIS session — it is write-only with no read-back. Do NOT use it for "
-        "anything about the current repository or task (that belongs to this session, not "
-        "the owner's memory), or for anything transient you would not want resurfacing "
-        "months from now. Returns a plain confirmation that it was queued, nothing more."
+        "locally and immediately, and sent on to Mark VI right away if this peer is "
+        "connected — otherwise it waits for the next reconnect. Do NOT expect it to be "
+        "searchable or visible anywhere in THIS session — it is write-only with no "
+        "read-back, even when it sends immediately. Do NOT use it for anything about the "
+        "current repository or task (that belongs to this session, not the owner's "
+        "memory), or for anything transient you would not want resurfacing months from "
+        "now. Returns a plain confirmation of what happened to it, nothing more."
     )
     Args = RememberAboutOwnerArgs
     READ_ONLY = False
@@ -65,7 +68,24 @@ class RememberAboutOwner(Tool):
 
         domain = args.domain if args.domain in _DOMAINS else "state"
         owner_memory.queue_observation(args.content, domain=domain)
+
+        channel = getattr(ctx, "memory", None)
+        if channel is None:
+            return ToolResult(
+                "Noted locally. It will reach Mark VI's memory the next time this "
+                "peer connects — there is nothing further to check here."
+            )
+
+        # Already connected — no reason to make an open channel wait for a
+        # future reconnect. Best-effort: a flush failure here is not this
+        # tool's failure, the line just waits for the next one instead.
+        try:
+            sent = await owner_memory.flush_pending(channel)
+        except Exception:  # noqa: BLE001 — queued either way; report accordingly
+            sent = 0
+        if sent:
+            return ToolResult("Noted, and sent to Mark VI's memory just now.")
         return ToolResult(
-            "Noted locally. It will reach Mark VI's memory the next time this "
-            "peer connects — there is nothing further to check here."
+            "Noted locally. It did not go out this turn (channel busy or the send "
+            "failed) — it will reach Mark VI's memory the next time this peer connects."
         )
