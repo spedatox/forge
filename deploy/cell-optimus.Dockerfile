@@ -60,11 +60,18 @@ RUN apt-get update \
 #    out to have one more piece than assumed, and a wholesale copy of the
 #    source of truth is what stops there being a third. No collision risk with
 #    the Python base image: it owns /usr/local/bin/python3*, pip*, none of
-#    which Node's directory contains. corepack is enabled so `yarn`/`pnpm` are
-#    available on demand without a separate global install.
+#    which Node's directory contains. corepack comes along in that copy, so
+#    `yarn`/`pnpm` are one `corepack enable` away at job time — see the RUN
+#    below for why enabling is left to the job rather than done here.
 COPY --from=node /usr/local/bin/ /usr/local/bin/
 COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
-RUN corepack enable && node --version && npm --version
+# `corepack enable` is NOT run here on purpose. At build time it tries to
+# realpath and rewrite the yarn/pnpm shims and chokes on the ones copied in
+# ("ENOENT realpath '/usr/local/bin/yarn'") — a fragile step for something the
+# lab does not need up front. corepack itself is present, so a job that wants
+# yarn/pnpm runs `corepack enable` at job time (the Cell is root). node/npm/npx
+# are the primary tools and are ready now; the check proves it.
+RUN node --version && npm --version && npx --version
 
 # 3) Python developer tooling, baked so the common loop (make a venv, lint, test)
 #    pays nothing at job time. uv is included because it is the fast path for the
