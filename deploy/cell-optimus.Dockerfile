@@ -50,17 +50,19 @@ RUN apt-get update \
  && apt-get clean \
  && rm -rf /var/lib/apt/lists/*
 
-# 2) Node + npm, copied from the official image (see the top comment). The
-#    official image's own /usr/local/bin/{node,npm,npx,corepack} are copied
-#    verbatim rather than hand-reconstructed — corepack in particular is its
-#    own shim (not derivable from npm's), and re-deriving symlinks by hand is
-#    exactly the kind of thing that silently drifts the next time Node bumps
-#    its layout. corepack is enabled so `yarn`/`pnpm` are available on demand
-#    without a separate global install.
-COPY --from=node /usr/local/bin/node     /usr/local/bin/node
-COPY --from=node /usr/local/bin/npm      /usr/local/bin/npm
-COPY --from=node /usr/local/bin/npx      /usr/local/bin/npx
-COPY --from=node /usr/local/bin/corepack /usr/local/bin/corepack
+# 2) Node + npm, copied from the official image (see the top comment) — the
+#    WHOLE of /usr/local/bin, not individual named files. corepack's shim
+#    requires a sibling `lib/corepack.cjs` that lives beside it in that
+#    directory, not inside node_modules; picking files by name (node, npm, npx,
+#    corepack) missed it and broke `corepack enable`. Copying the directory
+#    wholesale is also the fix for the failure mode that caused THAT bug: this
+#    is the second time Node's own internal layout under /usr/local/bin turned
+#    out to have one more piece than assumed, and a wholesale copy of the
+#    source of truth is what stops there being a third. No collision risk with
+#    the Python base image: it owns /usr/local/bin/python3*, pip*, none of
+#    which Node's directory contains. corepack is enabled so `yarn`/`pnpm` are
+#    available on demand without a separate global install.
+COPY --from=node /usr/local/bin/ /usr/local/bin/
 COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
 RUN corepack enable && node --version && npm --version
 
