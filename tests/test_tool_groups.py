@@ -164,6 +164,18 @@ def test_an_unconfigured_push_token_withholds_git_push(monkeypatch):
     assert "git_push" not in _resolved()
 
 
+def test_a_configured_push_token_offers_open_pr_too(monkeypatch):
+    """open_pr shares git_push's credential, so one token gates both."""
+    monkeypatch.setenv("FORGE_GIT_TOKEN", "ghp_test")
+    assert "open_pr" in _resolved()
+
+
+def test_an_unconfigured_push_token_withholds_open_pr(monkeypatch):
+    monkeypatch.delenv("FORGE_GIT_TOKEN", raising=False)
+    monkeypatch.delenv("FORGE_GIT_TOKEN_OPTIMUS", raising=False)
+    assert "open_pr" not in _resolved()
+
+
 # ── Who gets what, stated so a change to it is deliberate ────────────────────
 
 def test_the_peer_can_reach_the_vault_and_the_owner(monkeypatch):

@@ -87,19 +87,23 @@ built they are picked up with no further config. Rebuild after changing a
 Dockerfile; under the subprocess backend (Docker-less host) the images are
 ignored and commands use the host's own tools.
 
-### Git push credential (optional, per-agent)
+### Git push + PR credential (optional, per-agent)
 
-`git_push` publishes commits to GitHub, and it holds the credential **outside**
-the Cell: the token lives in the peer's environment and is passed only to the
-host-side push subprocess, never to the sandbox where model-written code runs.
-The tool is withheld entirely until a token is set, so this is opt-in per agent.
+`git_push` publishes commits to GitHub and `open_pr` opens a pull request from
+a branch already pushed; both hold the credential **outside** the Cell: the
+token lives in the peer's environment and is passed only to the host-side push
+subprocess or the GitHub API call, never to the sandbox where model-written
+code runs. One token arms both tools together — they are withheld entirely
+until it is set, so this is opt-in per agent.
 
 To arm Optimus:
 
 1. On **Optimus's own GitHub account**, create a **fine-grained** Personal Access
    Token, scoped to only the repositories it should push to, with
-   **Contents: Read and write** (add **Pull requests** if it will open PRs).
-   Nothing broader — the whole point is a tight blast radius if it ever leaks.
+   **Contents: Read and write** and **Pull requests: Read and write** (the
+   latter is what lets `open_pr` work — omit it and `git_push` still works,
+   `open_pr` just fails with a scope error every call). Nothing broader — the
+   whole point is a tight blast radius if it ever leaks.
 2. Put it in the agent's env file (loaded only by that agent's peer), mode 600:
 
    ```bash
@@ -109,9 +113,9 @@ To arm Optimus:
    ```
 
 `FORGE_GIT_TOKEN` in `.env.optimus` reaches only the Optimus peer, so Centurion
-never sees it and its `git_push` stays withheld. A shared `/opt/forge-mk1/.env`
-entry would arm every agent — prefer the per-agent file. Rotate/revoke on the
-GitHub account; nothing here caches it.
+never sees it and its `git_push`/`open_pr` stay withheld. A shared
+`/opt/forge-mk1/.env` entry would arm every agent — prefer the per-agent file.
+Rotate/revoke on the GitHub account; nothing here caches it.
 
 The workspace root inside the Hisar vault is the whole of the placement plan's
 passive H4 layer: live Cell workspaces are browsable on the web desktop with no

@@ -203,3 +203,153 @@ def test_a_pre_push_hook_does_not_run(tmp_path, monkeypatch):
 
     assert not res.is_error, res.content
     assert not marker.exists(), "pre-push hook ran despite hooks being disabled"
+
+
+# ── open_pr ───────────────────────────────────────────────────────────────
+#
+# Shares _resolve_repo/_resolve_remote with git_push (the path-escape,
+# not-a-repo, non-github-remote and insteadOf refusals are exercised above and
+# apply identically here — that sharing is the point, not something to
+# re-prove per tool). What's specific to open_pr is the GitHub API call itself:
+# the request shape, the default-branch lookup, and the error mapping.
+
+from forge.tools.gitpush import OpenPR, _explain_api, _owner_repo  # noqa: E402
+
+
+class _APIResponse:
+    def __init__(self, status=200, payload=None, text=""):
+        self.status_code = status
+        self._payload = payload
+        self.text = text or (str(payload) if payload else "")
+
+    def json(self):
+        if self._payload is None:
+            raise ValueError("no json")
+        return self._payload
+
+
+class _FakeHttpx:
+    """Stands in for the httpx module, mirroring test_hisar_tools.py's fake:
+    `gp._client()` returns the module, the tool constructs AsyncClient from it.
+    `responses` is consumed in order, one per call, so a test can script the
+    default-branch lookup and the PR creation as two separate steps."""
+
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls: list[dict] = []
+
+    def AsyncClient(self, **_kw):
+        outer = self
+
+        class _C:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_a):
+                return False
+
+            async def request(self, method, url, **kwargs):
+                outer.calls.append({"method": method, "url": url, **kwargs})
+                resp = outer.responses.pop(0)
+                if isinstance(resp, Exception):
+                    raise resp
+                return resp
+
+        return _C()
+
+
+def _call_pr(ctx, **kw):
+    args = OpenPR.Args(**kw)
+    return asyncio.run(OpenPR().call(args, ctx))
+
+
+@pytest.mark.parametrize("status,needle", [
+    (401, "rejected the credential"),
+    (403, "pull_requests: write"),
+    (404, "no such repository"),
+    (422, "no commits ahead"),
+    (500, "HTTP 500"),
+])
+def test_explain_api_maps_every_status_to_a_next_step(status, needle):
+    assert needle.lower() in _explain_api(status, "detail").lower()
+
+
+def test_owner_repo_splits_a_validated_url():
+    assert _owner_repo("https://github.com/o/r.git") == ("o", "r")
+    assert _owner_repo("https://github.com/spedatox/forge.git") == ("spedatox", "forge")
+
+
+def test_refused_without_a_token(tmp_path, monkeypatch):
+    monkeypatch.delenv("FORGE_GIT_TOKEN", raising=False)
+    monkeypatch.delenv("FORGE_GIT_TOKEN_OPTIMUS", raising=False)
+    _init_repo(tmp_path, origin="https://github.com/o/r.git")
+    res = _call_pr(_ctx(tmp_path), path=".", head="feat", title="t")
+    assert res.is_error
+    assert "not configured" in res.content
+
+
+def test_refuses_a_non_github_remote(tmp_path, monkeypatch):
+    monkeypatch.setenv("FORGE_GIT_TOKEN", "ghp_x")
+    _init_repo(tmp_path, origin="https://gitlab.com/o/r.git")
+    res = _call_pr(_ctx(tmp_path), path=".", head="feat", title="t")
+    assert res.is_error
+    assert "not a github.com remote" in res.content
+
+
+def test_opens_a_pr_with_an_explicit_base(tmp_path, monkeypatch):
+    monkeypatch.setenv("FORGE_GIT_TOKEN", "ghp_x")
+    _init_repo(tmp_path, origin="https://github.com/o/r.git")
+    fake = _FakeHttpx([_APIResponse(201, {"number": 7, "html_url": "https://github.com/o/r/pull/7"})])
+    monkeypatch.setattr(gp, "_client", lambda: fake)
+
+    res = _call_pr(_ctx(tmp_path), path=".", head="feature-x", title="Add X", base="main")
+
+    assert not res.is_error, res.content
+    assert "#7" in res.content
+    assert "https://github.com/o/r/pull/7" in res.content
+    assert len(fake.calls) == 1, "an explicit base must skip the default-branch lookup"
+    call = fake.calls[0]
+    assert call["url"] == "https://api.github.com/repos/o/r/pulls"
+    assert call["headers"]["Authorization"] == "Bearer ghp_x"
+    assert call["json"] == {"title": "Add X", "head": "feature-x", "base": "main",
+                            "body": "", "draft": False}
+
+
+def test_opens_a_pr_against_the_default_branch_when_base_is_omitted(tmp_path, monkeypatch):
+    monkeypatch.setenv("FORGE_GIT_TOKEN", "ghp_x")
+    _init_repo(tmp_path, origin="https://github.com/o/r.git")
+    fake = _FakeHttpx([
+        _APIResponse(200, {"default_branch": "trunk"}),
+        _APIResponse(201, {"number": 1, "html_url": "https://github.com/o/r/pull/1"}),
+    ])
+    monkeypatch.setattr(gp, "_client", lambda: fake)
+
+    res = _call_pr(_ctx(tmp_path), path=".", head="feature-x", title="Add X")
+
+    assert not res.is_error, res.content
+    assert len(fake.calls) == 2
+    assert fake.calls[0]["url"] == "https://api.github.com/repos/o/r"
+    assert fake.calls[1]["json"]["base"] == "trunk"
+
+
+def test_a_422_names_the_likely_cause(tmp_path, monkeypatch):
+    monkeypatch.setenv("FORGE_GIT_TOKEN", "ghp_x")
+    _init_repo(tmp_path, origin="https://github.com/o/r.git")
+    fake = _FakeHttpx([_APIResponse(422, text="Validation Failed")])
+    monkeypatch.setattr(gp, "_client", lambda: fake)
+
+    res = _call_pr(_ctx(tmp_path), path=".", head="feature-x", title="Add X", base="main")
+
+    assert res.is_error
+    assert "no commits ahead" in res.content.lower() or "already exists" in res.content.lower()
+
+
+def test_the_token_never_appears_in_the_result(tmp_path, monkeypatch):
+    monkeypatch.setenv("FORGE_GIT_TOKEN", "super-secret-token")
+    _init_repo(tmp_path, origin="https://github.com/o/r.git")
+    fake = _FakeHttpx([_APIResponse(401, text="Bad credentials")])
+    monkeypatch.setattr(gp, "_client", lambda: fake)
+
+    res = _call_pr(_ctx(tmp_path), path=".", head="feature-x", title="Add X", base="main")
+
+    assert "super-secret-token" not in res.content

@@ -11,7 +11,7 @@ from forge.tools.ask import AskOperator
 from forge.tools.claude_code import ClaudeCode
 from forge.tools.diagnostics import Diagnostics
 from forge.tools.files import ReadFile, WriteFile, EditFile
-from forge.tools.gitpush import GitPush
+from forge.tools.gitpush import GitPush, OpenPR
 from forge.tools.graph import GraphQuery, GraphPath, GraphOverview, GraphIndex
 from forge.tools.hisar import HisarDeposit, HisarList, HisarRead
 from forge.tools.memory import Memory
@@ -47,13 +47,14 @@ HISAR_TOOLS = [HisarList, HisarRead, HisarDeposit]
 NOTIFY_TOOLS = [TelegramSend]
 
 # Publishing to GitHub, with the push credential held Warden-side. Its own group,
-# separate from `coding`, for the same reason the vault is: pushing under a real
-# account's token is a capability a profile takes on purpose, not something every
-# repo-working agent inherits. Withheld at dispatch when no token is configured
+# separate from `coding`, for the same reason the vault is: pushing (and opening
+# a PR, which reuses the same credential) under a real account's token is a
+# capability a profile takes on purpose, not something every repo-working agent
+# inherits. Withheld at dispatch when no token is configured
 # (toolsource.without_git_tools), so a deployment with no credential never offers
 # a door it has no key for. Committing needs none of this — it happens in the
-# Cell with the identity env; only push is gated.
-GIT_TOOLS = [GitPush]
+# Cell with the identity env; only the two calls that reach GitHub are gated.
+GIT_TOOLS = [GitPush, OpenPR]
 
 # Asking the owner a question mid-job. In CODING_TOOLS rather than its own
 # group: reaching a fork you should not pick alone is not an optional extra
@@ -96,7 +97,7 @@ ALL_TOOLS = {cls.name: cls for cls in [
     GraphQuery, GraphPath, GraphOverview, GraphIndex, Diagnostics, WebSearch, WebFetch, TodoWrite,
     EnterWorktree, ExitWorktree, TaskTool, ClaudeCode,
     HisarList, HisarRead, HisarDeposit, TelegramSend, AskOperator,
-    Memory, RememberAboutOwner, GitPush,
+    Memory, RememberAboutOwner, GitPush, OpenPR,
 ]}
 
 __all__ = ["ALL_TOOLS", "NAV_TOOLS", "CODING_TOOLS", "SECURITY_TOOLS", "WEB_TOOLS",
@@ -105,4 +106,4 @@ __all__ = ["ALL_TOOLS", "NAV_TOOLS", "CODING_TOOLS", "SECURITY_TOOLS", "WEB_TOOL
            "RunCommand", "ReadFile", "WriteFile", "EditFile", "Grep", "Glob",
            "GraphQuery", "GraphPath", "GraphOverview", "GraphIndex", "Diagnostics", "WebSearch", "WebFetch",
            "TodoWrite", "EnterWorktree", "ExitWorktree", "TaskTool", "ClaudeCode",
-           "HisarList", "HisarRead", "HisarDeposit", "TelegramSend", "AskOperator", "GitPush"]
+           "HisarList", "HisarRead", "HisarDeposit", "TelegramSend", "AskOperator", "GitPush", "OpenPR"]

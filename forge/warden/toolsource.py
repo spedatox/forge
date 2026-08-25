@@ -77,10 +77,10 @@ def without_hisar_tools(tools: dict[str, Tool]) -> dict[str, Tool]:
             if name not in HISAR_TOOL_NAMES}
 
 
-#: The push tool. Same rule as the vault: it needs a credential (the push token)
-#: and without one every push is an auth failure the model reads as transient.
-#: Committing needs none of this, so only push is gated.
-GIT_TOOL_NAMES = ("git_push",)
+#: The two tools that reach GitHub. Same rule as the vault: each needs the push
+#: credential, and without one every call is an auth failure the model reads as
+#: transient. Committing needs none of this, so only these two are gated.
+GIT_TOOL_NAMES = ("git_push", "open_pr")
 
 
 def without_git_tools(tools: dict[str, Tool]) -> dict[str, Tool]:
