@@ -50,14 +50,19 @@ RUN apt-get update \
  && apt-get clean \
  && rm -rf /var/lib/apt/lists/*
 
-# 2) Node + npm, copied from the official image (see the top comment). corepack
-#    is enabled so `yarn`/`pnpm` are available on demand without a global install.
-COPY --from=node /usr/local/bin/node /usr/local/bin/node
+# 2) Node + npm, copied from the official image (see the top comment). The
+#    official image's own /usr/local/bin/{node,npm,npx,corepack} are copied
+#    verbatim rather than hand-reconstructed — corepack in particular is its
+#    own shim (not derivable from npm's), and re-deriving symlinks by hand is
+#    exactly the kind of thing that silently drifts the next time Node bumps
+#    its layout. corepack is enabled so `yarn`/`pnpm` are available on demand
+#    without a separate global install.
+COPY --from=node /usr/local/bin/node     /usr/local/bin/node
+COPY --from=node /usr/local/bin/npm      /usr/local/bin/npm
+COPY --from=node /usr/local/bin/npx      /usr/local/bin/npx
+COPY --from=node /usr/local/bin/corepack /usr/local/bin/corepack
 COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
-RUN ln -sf /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
- && ln -sf /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
- && corepack enable \
- && node --version && npm --version
+RUN corepack enable && node --version && npm --version
 
 # 3) Python developer tooling, baked so the common loop (make a venv, lint, test)
 #    pays nothing at job time. uv is included because it is the fast path for the
