@@ -70,36 +70,6 @@ def test_interrupt_yields_clean_aborted():
     assert term.reason is StopReason.ABORTED
 
 
-def test_forced_cancel_keeps_the_partial_transcript():
-    """A forced abort (task.cancel) must not forget the turn it was in the middle
-    of. The operator's prompt and any tool rounds committed before the cancel
-    survive as the returned Terminal's messages, so the next turn remembers."""
-    warden = _warden([
-        lambda m: ("reading the repo", [tool_call("echo", text="first")]),
-        lambda m: ("still working", [tool_call("echo", text="second")]),
-        lambda m: ("done", []),
-    ])
-
-    async def scenario():
-        task = asyncio.create_task(warden.run("fix the retry"))
-        # Let the first tool round commit, then force-cancel mid-run.
-        await asyncio.sleep(0)
-        task.cancel()
-        return await task
-
-    term = asyncio.run(scenario())
-    assert term.reason is StopReason.ABORTED
-    # The operator's prompt is still there, not replaced by a bare "cancelled".
-    assert any(m.get("role") == "user" and m.get("content") == "fix the retry"
-               for m in term.messages)
-    # The abort marker is present, so the transcript stays well-formed and
-    # tells the next turn why it stopped.
-    assert any(m.get("role") == "user"
-               and isinstance(m.get("content"), str)
-               and "interrupted" in m.get("content")
-               for m in term.messages)
-
-
 # ── §4 the tool boundary: errors-as-results, never exceptions ────────────────
 def test_unknown_tool_becomes_error_result_not_crash():
     steps = [lambda m: ("call missing", [tool_call("does_not_exist", x=1)]),

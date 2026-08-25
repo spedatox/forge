@@ -187,6 +187,11 @@ class Warden:
         """Per-Warden, so a subagent's observations never leak into its
         parent's — a child that retried a failing call says nothing about
         whether the parent is stuck."""
+        self._state: LoopState | None = None
+        """The live loop's state, while it runs. Kept reachable so a caller that
+        force-cancels the task can still recover everything the loop had already
+        committed — a transcript that died mid-turn still costs only its own
+        unfinished sentence, not every tool round that ran before the cancel."""
 
     async def run(self, task: str) -> Terminal:
         """Drive the loop for one job and return its single typed Terminal."""
@@ -201,20 +206,9 @@ class Warden:
         real entry point and `run` is the one-message case of it."""
         state = LoopState(messages=list(messages), ledger=self.ledger,
                           operator_turns=operator_turns(messages))
+        self._state = state
         tool_schemas = [t.schema() for t in self.tools.values()]
 
-        # A cancelled run is still a run that happened: whatever it committed
-        # before the cancel is its transcript, and it must come home rather than
-        # evaporate with the task. Catching CancelledError here turns the forced
-        # abort (repl.py's second ctrl+c) into the same clean `_aborted` ending a
-        # graceful interrupt produces, so the operator's prompt and any tool
-        # rounds that already ran survive to the next turn and the save.
-        try:
-            return await self._loop(state, tool_schemas)
-        except asyncio.CancelledError:
-            return self._aborted(state)
-
-    async def _loop(self, state: LoopState, tool_schemas: list[dict[str, Any]]) -> Terminal:
         while True:
             # ── Budget boundary: the single iteration ceiling (§3). ──────────
             # Retry laps are excluded: the ceiling bounds work attempted, and a
@@ -818,6 +812,20 @@ class Warden:
         return self._terminal(
             StopReason.MAX_ITERATIONS, state,
             error=f"max_iterations ({self.max_iterations}) reached")
+
+    def recover_transcript(self) -> list[dict[str, Any]] | None:
+        """The loop's committed transcript, still readable after a forced cancel.
+
+        A caller that cancelled the task (rather than asking it to stop at a
+        boundary) has no Terminal to read — `run_messages` unwound, and its local
+        `state` died with it. This hands back whatever the loop had committed to
+        the transcript before the cancel, so a force-cancelled turn loses only the
+        sentence it was mid-way through streaming, not every tool round it had
+        already run. None when the loop never started (the task was cancelled
+        before `run_messages` assigned its state)."""
+        if self._state is None:
+            return None
+        return list(self._state.messages)
 
     def _aborted(self, state: LoopState) -> Terminal:
         state.messages.append(

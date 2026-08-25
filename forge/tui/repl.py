@@ -429,15 +429,18 @@ def _model_ref_for(session: Session, pending: list[dict]) -> str:
     return cfg.vision_model
 
 
-def _aborted_terminal(session: Session) -> Terminal:
+def _aborted_terminal(session: Session, partial: "list[dict] | None" = None) -> Terminal:
     """What a forced stop leaves behind.
 
-    The transcript is whatever the session already had: a cancelled task cannot
-    be asked what it had reached, so nothing new is claimed about it. The next
-    turn re-seeds from here, and `repair_transcript` fixes any tool_use left
-    without its result — which is exactly the shape a forced cancel produces."""
+    The transcript is whatever the session already had, unless the caller hands
+    back the warden's own committed transcript — a forced cancel has no Terminal
+    to read, but the loop held onto everything it had written before the cancel,
+    so nothing about that turn's completed work is lost. The next turn re-seeds
+    from here, and `repair_transcript` fixes any tool_use left without its result
+    — which is exactly the shape a forced cancel produces."""
+    messages = list(partial) if partial is not None else list(session.messages)
     return Terminal(reason=StopReason.ABORTED, final_text="",
-                    iterations=0, error=None, messages=list(session.messages),
+                    iterations=0, error=None, messages=messages,
                     transitions=(), usage=session.ledger.snapshot())
 
 
@@ -645,10 +648,13 @@ async def _run_turn(prompt: Any, session: Session, settings: ForgeSettings,
             except asyncio.CancelledError:
                 # The forced path: the second press cancelled the task. That is
                 # the operator's decision arriving, not a failure, so it becomes
-                # an ABORTED terminal like any other stop.
+                # an ABORTED terminal like any other stop. The warden can no longer
+                # return its Terminal, but it held onto the transcript it had
+                # committed before the cancel — recover it so the operator's prompt
+                # and every tool round that already ran survive to the next turn.
                 if not warden_task.cancelled():
                     raise
-                terminal = _aborted_terminal(session)
+                terminal = _aborted_terminal(session, warden.recover_transcript())
             except KeyboardInterrupt:
                 # Only reachable if the handler could not be installed. Same
                 # ending: ask, wait, and never let it past this frame.
