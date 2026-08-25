@@ -12,7 +12,7 @@ import tomllib
 from pathlib import Path
 
 from forge.agents.config import AgentConfig, CellSpec, GitIdentity
-from forge.tools import (ALL_TOOLS, CODING_TOOLS, HISAR_TOOLS, MEMORY_TOOLS,
+from forge.tools import (ALL_TOOLS, CODING_TOOLS, GIT_TOOLS, HISAR_TOOLS, MEMORY_TOOLS,
                          NOTIFY_TOOLS, SECURITY_TOOLS, WEB_TOOLS)
 
 AGENTS_DIR = Path(__file__).parent
@@ -39,6 +39,7 @@ _TOOL_GROUPS = {
     # folded into `coding`: a profile takes one, both or neither on purpose.
     "hisar": tuple(cls.name for cls in HISAR_TOOLS),
     "notify": tuple(cls.name for cls in NOTIFY_TOOLS),
+    "git": tuple(cls.name for cls in GIT_TOOLS),
 }
 
 

@@ -77,6 +77,17 @@ def without_hisar_tools(tools: dict[str, Tool]) -> dict[str, Tool]:
             if name not in HISAR_TOOL_NAMES}
 
 
+#: The push tool. Same rule as the vault: it needs a credential (the push token)
+#: and without one every push is an auth failure the model reads as transient.
+#: Committing needs none of this, so only push is gated.
+GIT_TOOL_NAMES = ("git_push",)
+
+
+def without_git_tools(tools: dict[str, Tool]) -> dict[str, Tool]:
+    return {name: tool for name, tool in tools.items()
+            if name not in GIT_TOOL_NAMES}
+
+
 #: The owner's memory. Same rule again, one layer along: it is withheld when the
 #: run has no channel to Mark VI rather than when the deployment lacks a
 #: credential, so it is filtered per job like the graph set and not once at
@@ -98,12 +109,14 @@ def resolve_optional(tools: dict[str, Tool]) -> dict[str, Tool]:
     appear mid-session once `graph_index` builds one, so it is re-checked per
     turn rather than settled once at startup."""
     from forge import notify
-    from forge.tools import hisar
+    from forge.tools import gitpush, hisar
 
     if not hisar.configured():
         tools = without_hisar_tools(tools)
     if not notify.configured():
         tools = {n: t for n, t in tools.items() if n != "telegram_send"}
+    if not gitpush.configured():
+        tools = without_git_tools(tools)
     return tools
 
 

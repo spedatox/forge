@@ -151,6 +151,19 @@ def test_an_unconfigured_bot_is_still_withheld(monkeypatch):
     assert "telegram_send" not in _resolved()
 
 
+def test_a_configured_push_token_offers_git_push(monkeypatch):
+    monkeypatch.setenv("FORGE_GIT_TOKEN", "ghp_test")
+    assert "git_push" in _resolved()
+
+
+def test_an_unconfigured_push_token_withholds_git_push(monkeypatch):
+    """Without a token every push is an auth failure the model retries — so the
+    tool is withheld, exactly like the vault, rather than offered and failing."""
+    monkeypatch.delenv("FORGE_GIT_TOKEN", raising=False)
+    monkeypatch.delenv("FORGE_GIT_TOKEN_OPTIMUS", raising=False)
+    assert "git_push" not in _resolved()
+
+
 # ── Who gets what, stated so a change to it is deliberate ────────────────────
 
 def test_the_peer_can_reach_the_vault_and_the_owner(monkeypatch):
