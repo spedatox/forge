@@ -139,8 +139,10 @@ run_as_root = true
 # Who git records for work this agent does. Committing under the operator's
 # name makes the history lie about who wrote the code, which costs most later —
 # when someone is working out why a change was made and asks the wrong person.
-# No account is required anywhere: git stores a name and an address, and a host
-# links it to a profile only if that address belongs to a registered account.
+# The email is what a host keys on: GitHub links a commit to whichever account
+# owns this address, by email and not by the display name — so Optimus's own
+# account now backs this identity, and the "Optimus Mark II" string is only how
+# the name renders, not what the attribution follows.
 [git]
 name = "Optimus Mark II"
-email = "optimus@spedatox.systems"
+email = "ahmeterolbayrak1@gmail.com"
