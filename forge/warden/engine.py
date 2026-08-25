@@ -203,6 +203,18 @@ class Warden:
                           operator_turns=operator_turns(messages))
         tool_schemas = [t.schema() for t in self.tools.values()]
 
+        # A cancelled run is still a run that happened: whatever it committed
+        # before the cancel is its transcript, and it must come home rather than
+        # evaporate with the task. Catching CancelledError here turns the forced
+        # abort (repl.py's second ctrl+c) into the same clean `_aborted` ending a
+        # graceful interrupt produces, so the operator's prompt and any tool
+        # rounds that already ran survive to the next turn and the save.
+        try:
+            return await self._loop(state, tool_schemas)
+        except asyncio.CancelledError:
+            return self._aborted(state)
+
+    async def _loop(self, state: LoopState, tool_schemas: list[dict[str, Any]]) -> Terminal:
         while True:
             # ── Budget boundary: the single iteration ceiling (§3). ──────────
             # Retry laps are excluded: the ceiling bounds work attempted, and a
