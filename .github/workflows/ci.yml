@@ -228,16 +228,27 @@ jobs:
             # left alone; rebuild it by hand (deploy/README.md) when you
             # actually want it refreshed.
             #
-            # No sudo: the deploy account must be able to run docker directly
-            # (in the `docker` group). If this step fails with a permission
-            # error, that membership is missing — add it once on the host with
-            # `sudo usermod -aG docker <deploy-user>` and re-run.
-            docker image inspect forge-cell-optimus:latest >/dev/null 2>&1 || \
-              docker build -f deploy/cell-optimus.Dockerfile \
-                -t forge-cell-optimus:latest deploy/
-            docker image inspect forge-cell-centurion:latest >/dev/null 2>&1 || \
-              docker build -f deploy/cell-centurion.Dockerfile \
-                -t forge-cell-centurion:latest deploy/
+            # BEST-EFFORT, never fatal. The code deploy below (git reset + pip +
+            # restart) needs no docker; only this image build does. When the
+            # deploy account cannot reach the daemon (not in the `docker` group),
+            # failing here would block a code deploy that had nothing to do with
+            # images — worse than the missing-image case, which the peer only
+            # hits at job time and which images built by hand (deploy/README.md)
+            # already cover. So: if docker is unreachable, warn and move on; if
+            # it IS reachable, build only a MISSING image (Centurion's
+            # kalilinux/kali-rolling base is a floating tag, so an unconditional
+            # rebuild would rerun its ~30-40 min apt install and swap a
+            # known-good image for whatever the tag resolves to today).
+            if docker info >/dev/null 2>&1; then
+              docker image inspect forge-cell-optimus:latest >/dev/null 2>&1 || \
+                docker build -f deploy/cell-optimus.Dockerfile \
+                  -t forge-cell-optimus:latest deploy/
+              docker image inspect forge-cell-centurion:latest >/dev/null 2>&1 || \
+                docker build -f deploy/cell-centurion.Dockerfile \
+                  -t forge-cell-centurion:latest deploy/
+            else
+              echo "::warning::deploy account cannot reach docker; skipping Cell image build (peer uses existing images; build by hand per deploy/README.md or add the deploy user to the docker group)."
+            fi
 
             # The unit file is version-controlled. Sync it only when it
             # actually differs, so an unchanged deploy does not daemon-reload.
