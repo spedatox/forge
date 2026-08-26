@@ -21,6 +21,11 @@ class ToolUseRequest:
     id: str
     name: str
     input: dict[str, Any] = field(default_factory=dict)
+    reasoning_content: str | None = None
+    """Provider reasoning text that preceded the tool call (DeepSeek reasoning
+    models). Carried here so the assistant message carrying the tool call can
+    round-trip it back, which DeepSeek requires once thinking is enabled. Empty
+    for providers that do not emit it."""
 
 
 @dataclass

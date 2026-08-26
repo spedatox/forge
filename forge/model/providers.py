@@ -180,6 +180,7 @@ class OpenAICompatModel:
         acc: dict[int, dict[str, str]] = {}
         usage: Any = None
         finish: str | None = None
+        reasoning_parts: list[str] = []
         try:
             async for chunk in raw:
                 if signal.is_set():
@@ -191,6 +192,13 @@ class OpenAICompatModel:
                 delta = chunk.choices[0].delta
                 if delta is None:
                     continue
+                # DeepSeek's reasoning models stream their chain-of-thought as
+                # `reasoning_content` in `model_extra` (the OpenAI SDK has no typed
+                # field for it). Captured, not shown: it must travel back WITH the
+                # assistant message that carries the tool call, or DeepSeek rejects
+                # the replay once thinking is enabled.
+                if getattr(delta, "reasoning_content", None):
+                    reasoning_parts.append(delta.reasoning_content)
                 if delta.content:
                     yield TextDelta(delta.content)
                 for tc in delta.tool_calls or []:
@@ -206,11 +214,13 @@ class OpenAICompatModel:
             await raw.close()
         if signal.is_set():
             return
+        reasoning = "".join(reasoning_parts) or None
         for idx in sorted(acc):
             slot = acc[idx]
             yield ToolUseRequest(id=slot["id"] or _gen_tool_id(),
                                  name=slot["name"],
-                                 input=_parse_tool_args(slot["arguments"], slot["name"]))
+                                 input=_parse_tool_args(slot["arguments"], slot["name"]),
+                                 reasoning_content=reasoning)
         report = _usage_report(usage)
         if report is not None:
             yield report
@@ -304,12 +314,16 @@ def _to_openai_params(provider: str, model: str, system: str,
         # OpenAI deprecated max_tokens for reasoning models; the others still take it.
         params["max_completion_tokens" if provider == "openai" else "max_tokens"] = max_tokens
 
-    # DeepSeek-V4 defaults thinking ON, which is incompatible with the tool loop
-    # (it makes reasoning_content a required round-trip field once tool_use enters
-    # history). Force non-thinking whenever tools are present — i.e. the whole
-    # agent loop. Mirrors Mark VI's llm_client.
+    # DeepSeek-V4 defaults thinking ON, but that default is not honoured through
+    # the OpenAI-compat endpoint, so ask for it explicitly whenever tools are
+    # present — i.e. the whole agent loop. Mirrors Mark VI's llm_client.
+    #
+    # NOTE: an earlier revision forced {"type": "disabled"} here because thinking
+    # made `reasoning_content` a required round-trip field once tool_use entered
+    # history, which broke the tool loop. If reasoning_content starts failing to
+    # round-trip again, the loop here is where to look first.
     if provider == "deepseek" and tools:
-        params["extra_body"] = {"thinking": {"type": "disabled"}}
+        params["extra_body"] = {"thinking": {"type": "enabled"}}
     return params
 
 
@@ -462,6 +476,7 @@ def _translate_message(message: dict[str, Any]) -> list[dict[str, Any]]:
     user_images: list[dict[str, Any]] = []
     assistant_text: list[str] = []
     tool_calls: list[dict[str, Any]] = []
+    reasoning_content: str | None = None
 
     for block in content or []:
         btype = block.get("type")
@@ -478,6 +493,12 @@ def _translate_message(message: dict[str, Any]) -> list[dict[str, Any]]:
                 "function": {"name": block["name"],
                              "arguments": json.dumps(block.get("input") or {})},
             })
+            # DeepSeek requires the chain-of-thought to round-trip on the SAME
+            # assistant message that carries the tool calls. It arrives on the
+            # first tool_use block (all blocks in a turn share one reasoning
+            # content); kept as the message-level field the provider expects.
+            if reasoning_content is None and block.get("reasoning_content"):
+                reasoning_content = block["reasoning_content"]
         elif btype == "tool_result":
             rc = block.get("content", "")
             if isinstance(rc, list):
@@ -491,7 +512,12 @@ def _translate_message(message: dict[str, Any]) -> list[dict[str, Any]]:
         if tool_calls:
             # `content` must be "" not null here — z.ai GLM rejects null content
             # (error 1214) mid-loop; "" is valid for every OpenAI-compat provider.
-            out.append({"role": "assistant", "content": text, "tool_calls": tool_calls})
+            msg = {"role": "assistant", "content": text, "tool_calls": tool_calls}
+            if reasoning_content:
+                # Message-level, sibling of `tool_calls`: DeepSeek rejects a
+                # replayed tool call whose reasoning is missing.
+                msg["reasoning_content"] = reasoning_content
+            out.append(msg)
         elif text:
             out.append({"role": "assistant", "content": text})
     else:

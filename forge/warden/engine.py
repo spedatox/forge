@@ -136,7 +136,8 @@ class _Turn:
         content: list[dict[str, Any]] = []
         if self.text:
             content.append({"type": "text", "text": self.text})
-        content.extend({"type": "tool_use", "id": tu.id, "name": tu.name, "input": tu.input}
+        content.extend({"type": "tool_use", "id": tu.id, "name": tu.name, "input": tu.input,
+                        "reasoning_content": tu.reasoning_content}
                        for tu in self.tool_uses)
         return {"role": "assistant", "content": content or [{"type": "text", "text": ""}]}
 

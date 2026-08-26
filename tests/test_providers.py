@@ -75,20 +75,33 @@ def test_to_openai_params_tools_and_tokens():
     assert params["max_completion_tokens"] == 1000     # OpenAI uses max_completion_tokens
 
 
-def test_deepseek_disables_thinking_when_tools_present():
+def test_deepseek_enables_thinking_when_tools_present():
     params = _to_openai_params(
         "deepseek", "deepseek-v4-pro", "", [{"role": "user", "content": "x"}],
         [{"name": "t", "input_schema": {}}], max_tokens=100)
-    assert params["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert params["extra_body"] == {"thinking": {"type": "enabled"}}
+
+
+def test_translate_tool_use_round_trips_reasoning_content():
+    """DeepSeek requires the chain-of-thought to ride back on the assistant
+    message that carries the tool call; dropping it breaks the replay."""
+    assistant = {"role": "assistant", "content": [
+        {"type": "tool_use", "id": "t1", "name": "run_command",
+         "input": {"command": "ls"}, "reasoning_content": "check the dir first"},
+    ]}
+    out = _translate_message(assistant)
+    assert out[0]["tool_calls"][0]["function"]["name"] == "run_command"
+    assert out[0]["reasoning_content"] == "check the dir first"
 
 
 # ── streaming translation against a fake OpenAI client ───────────────────────
-def _chunk(content=None, tool=None, index=0):
+def _chunk(content=None, tool=None, index=0, reasoning=None):
     fn = None
     if tool:
         fn = types.SimpleNamespace(name=tool.get("name"), arguments=tool.get("arguments"))
     tcs = [types.SimpleNamespace(index=index, id=tool.get("id"), function=fn)] if tool else None
-    delta = types.SimpleNamespace(content=content, tool_calls=tcs)
+    delta = types.SimpleNamespace(content=content, tool_calls=tcs,
+                                  reasoning_content=reasoning)
     choice = types.SimpleNamespace(delta=delta, finish_reason=None)
     return types.SimpleNamespace(choices=[choice])
 
@@ -139,6 +152,52 @@ def test_streaming_yields_text_then_tool_use(monkeypatch):
     assert len(tools) == 1
     assert tools[0].name == "run_command"
     assert tools[0].input == {"command": "ls"}   # streamed JSON fragments reassembled
+
+
+def test_stream_captures_reasoning_content_for_tool_use():
+    """DeepSeek streams its chain-of-thought as `reasoning_content`; it must be
+    captured and attached to the tool call so it can round-trip on replay."""
+    chunks = [
+        _chunk(reasoning="let me "),
+        _chunk(reasoning="look"),
+        _chunk(tool={"id": "call_1", "name": "run_command", "arguments": '{"command": "ls"}'}),
+    ]
+
+    class FakeStream:
+        def __aiter__(self):
+            async def gen():
+                for c in chunks:
+                    yield c
+            return gen()
+        async def close(self): ...
+
+    class FakeCompletions:
+        async def create(self, **kwargs):
+            return FakeStream()
+
+    class FakeClient:
+        chat = types.SimpleNamespace(completions=FakeCompletions())
+
+    class S:
+        openai_api_key = "sk"
+        deepseek_api_key = "sk-deepseek"
+        gemini_api_key = zai_api_key = ""
+        ollama_base_url = "x"
+
+    model = OpenAICompatModel("deepseek", "deepseek-v4-pro", S())
+    model._client = FakeClient()
+
+    async def collect():
+        out = []
+        async for ev in model.stream(system="", messages=[{"role": "user", "content": "hi"}],
+                                     tools=[{"name": "run_command", "input_schema": {}}],
+                                     signal=asyncio.Event()):
+            out.append(ev)
+        return out
+
+    tools = [e for e in asyncio.run(collect()) if isinstance(e, ToolUseRequest)]
+    assert len(tools) == 1
+    assert tools[0].reasoning_content == "let me look"
 
 
 # ── gpt-5.6+ tool calls route to /v1/responses ───────────────────────────────
