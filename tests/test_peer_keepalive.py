@@ -125,6 +125,7 @@ def _handler_peer(send):
     peer.extensions = SimpleNamespace(
         tool_providers=lambda: [], fragments=None, hooks=None, bus=None)
     peer._cellpool = peer_mod.CellPool()
+    peer._inboxes = {}
     return peer
 
 

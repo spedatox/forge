@@ -8,7 +8,8 @@ the backend's existing protocol:
     → memory_request {skill: record_observation, ...}  → queued facts, flushed on connect
     ← task_dispatch {task_id, from, task, cwd}     → run one job → task_result
     ← chat_request  {chat_id, history, cwd, ...}   → run one job → chat_event stream
-    ← chat_cancel   {chat_id}                       → abort that run
+    ← chat_cancel   {chat_id}                       → abort that run (graceful)
+    ← chat_steer    {chat_id, text}                 → inject text into that run
     ← owner_memory_sync {block}                     → refresh the local memory snapshot
     ← shutdown                                      → stop, no reconnect
 
@@ -37,6 +38,7 @@ from forge.warden.oracle import Answer, ChannelOracle
 from forge.warden.permissions import AllowList
 from forge.gate.runner import run_job
 from forge.gate.cellpool import CellPool
+from forge.warden.inbox import Inbox
 from forge.warden.state import StopReason
 
 logger = logging.getLogger("forge.gate.peer")
@@ -65,7 +67,13 @@ _CHAT_FORWARD = frozenset({"chunk", "tool", "tool_result", "done", "error",
                            # A delegation's own activity, on its own channel so
                            # a client can show it in a panel of its own rather
                            # than mixed into the answer (forge/warden/subagents).
-                           "subagent"})
+                           "subagent",
+                           # The per-turn token spend. Mark VI's proxy keeps the
+                           # latest snapshot and folds it into the DONE frame, so
+                           # an external agent's usage reaches the same readout an
+                           # in-process one does instead of being dropped at the
+                           # socket (which is why Optimus/Centurion showed none).
+                           "usage"})
 
 
 class ForgePeer:
@@ -99,6 +107,12 @@ class ForgePeer:
         # containers are process-local) and is torn down when the peer stops.
         self._cellpool = CellPool()
         self._chats: dict[str, asyncio.Event] = {}     # chat_id/task_id → abort signal
+        # A live turn's steering inbox, keyed by chat_id. The owner can say
+        # something WHILE a chat turn runs (Mark VI forwards it as a
+        # `chat_steer` frame); the engine claims it at its own safe boundaries
+        # (forge/warden/inbox.py). Only chat turns get one — a fire-and-forget
+        # task_dispatch has nobody at a keyboard.
+        self._inboxes: dict[str, Inbox] = {}
         self._work: set[asyncio.Task] = set()
         self._shutdown = False
         self._stop = asyncio.Event()
@@ -268,6 +282,15 @@ class ForgePeer:
             ev = self._chats.get(str(frame.get("chat_id", "")))
             if ev is not None:
                 ev.set()
+        elif ftype == "chat_steer":
+            # The owner said something while this chat's turn is running. Queue
+            # it; the engine claims it at its next safe boundary and folds it in
+            # without corrupting the transcript (forge/warden/inbox.py). A steer
+            # for a chat that has already ended has no inbox and is dropped — a
+            # late interjection is not an error, same as a late chat_cancel.
+            box = self._inboxes.get(str(frame.get("chat_id", "")))
+            if box is not None:
+                box.push(str(frame.get("text", "")))
         elif ftype == "permission_response":
             # Additive frame (law 3). An answer to a question that already timed
             # out is dropped, not an error — a slow operator is not a bug.
@@ -431,6 +454,8 @@ class ForgePeer:
         chat_id = str(frame.get("chat_id", request.job_id))
         signal = asyncio.Event()
         self._chats[chat_id] = signal
+        inbox = Inbox()
+        self._inboxes[chat_id] = inbox
         terminal_seen = False
         last_activity = asyncio.get_running_loop().time()
 
@@ -471,7 +496,10 @@ class ForgePeer:
                                  # (keyed on chat_id inside run_job via job_id) so
                                  # a timeout+retry keeps the tools and caches the
                                  # turn already installed. Dispatch stays throwaway.
-                                 cell_pool=self._cellpool)
+                                 cell_pool=self._cellpool,
+                                 # The owner steering this running turn, if they
+                                 # do (chat_steer frames push into this inbox).
+                                 inbox=inbox)
             if not terminal_seen:
                 # Ensure Mark VI always gets a terminal frame (abort path, etc.).
                 final_type = "done" if term.reason is StopReason.COMPLETED else "error"
@@ -490,6 +518,7 @@ class ForgePeer:
             watchdog.cancel()
             keepalive.cancel()
             self._chats.pop(chat_id, None)
+            self._inboxes.pop(chat_id, None)
 
 
 def main() -> int:

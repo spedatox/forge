@@ -40,6 +40,7 @@ from forge.warden.toolsource import (
 from forge.warden.filestate import FileStateCache
 from forge.warden.todos import TodoList
 from forge.warden.ledger import TokenLedger
+from forge.warden.inbox import Inbox
 from forge.warden.permissions import AllowList, Mode, PermissionEngine
 from forge.warden.state import StopReason, Terminal
 from forge.warden.subagents import SubagentRunner
@@ -98,6 +99,7 @@ async def run_job(
     event_sinks: list | None = None,
     memory: Any | None = None,
     cell_pool: "CellPool | None" = None,
+    inbox: "Inbox | None" = None,
 ) -> Terminal:
     """Run one job to a single Terminal, streaming JobEvents via `emit`.
 
@@ -279,6 +281,11 @@ async def run_job(
             retry_base_delay=settings.retry_base_delay_s,
             refresh_tools=_tools,      # keeps the graph filter on a mid-job refresh
             emit=emit,
+            # Operator input that arrives mid-turn (peer path). None on a
+            # dispatch nobody is watching; the peer supplies one for a chat
+            # so the owner can steer a running turn — the engine claims it at
+            # its own safe boundaries (forge/warden/inbox.py).
+            inbox=inbox,
         )
 
         # Seam 8: subagents. A child is the same engine with a different prompt
