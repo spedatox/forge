@@ -13,7 +13,7 @@ from pathlib import Path
 
 from forge.agents.config import AgentConfig, CellSpec, GitIdentity
 from forge.tools import (ALL_TOOLS, CODING_TOOLS, GIT_TOOLS, HISAR_TOOLS, MEMORY_TOOLS,
-                         NOTIFY_TOOLS, SECURITY_TOOLS, WEB_TOOLS)
+                         NOTIFY_TOOLS, RECALL_TOOLS, SECURITY_TOOLS, WEB_TOOLS)
 
 AGENTS_DIR = Path(__file__).parent
 
@@ -34,6 +34,11 @@ _TOOL_GROUPS = {
     "security": tuple(cls.name for cls in SECURITY_TOOLS),
     "web": tuple(cls.name for cls in WEB_TOOLS),
     "memory": tuple(cls.name for cls in MEMORY_TOOLS),
+    # Recall over past sessions and the shared agent channel — read-only Mark VI
+    # knowledge, withheld with the memory group when there is no channel. Named
+    # separately so a profile takes "remember what was said and see the other
+    # agents" without also taking the power to rewrite the owner's memory.
+    "recall": tuple(cls.name for cls in RECALL_TOOLS),
     # The owner's filesystem and a line to their phone. Separate groups, and
     # separate from each other, because that is the entire reason they were not
     # folded into `coding`: a profile takes one, both or neither on purpose.

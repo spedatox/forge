@@ -16,6 +16,7 @@ from forge.tools.graph import GraphQuery, GraphPath, GraphOverview, GraphIndex
 from forge.tools.hisar import HisarDeposit, HisarList, HisarRead
 from forge.tools.memory import Memory
 from forge.tools.owner_notes import RememberAboutOwner
+from forge.tools.recall import RecallConversations, ReadAgentChannel
 from forge.tools.search import Grep, Glob
 from forge.tools.task import TaskTool
 from forge.tools.telegram import TelegramSend
@@ -69,6 +70,17 @@ ASK_TOOLS = [AskOperator]
 # there is no channel to Mark VI, so the standalone TUI never sees it.
 MEMORY_TOOLS = [Memory]
 
+# Reaching back through Mark VI for what was SAID (recall over past sessions) and
+# what the OTHER agents have been doing (the shared network channel). Its own
+# group, separate from MEMORY_TOOLS, because it is read-only knowledge retrieval
+# rather than the power to write the owner's memory — a profile can recall past
+# conversations and see its peers' work without also being able to rewrite a
+# fact every other agent trusts. Both reach Mark VI over the same peer socket the
+# `memory` tool uses, so the group is withheld under the same condition: no
+# channel, no tools (toolsource.without_recall_tools). This is also the seam that
+# makes the two Forge peers aware of each other's activity — see forge/tools/recall.py.
+RECALL_TOOLS = [RecallConversations, ReadAgentChannel]
+
 # remember_about_owner is deliberately NOT in MEMORY_TOOLS: that group is
 # stripped whenever there is no channel to Mark VI (toolsource.without_memory_tools),
 # and offline is exactly the case this tool exists for — it queues locally and
@@ -97,12 +109,12 @@ ALL_TOOLS = {cls.name: cls for cls in [
     GraphQuery, GraphPath, GraphOverview, GraphIndex, Diagnostics, WebSearch, WebFetch, TodoWrite,
     EnterWorktree, ExitWorktree, TaskTool, ClaudeCode,
     HisarList, HisarRead, HisarDeposit, TelegramSend, AskOperator,
-    Memory, RememberAboutOwner, GitPush, OpenPR,
+    Memory, RememberAboutOwner, RecallConversations, ReadAgentChannel, GitPush, OpenPR,
 ]}
 
 __all__ = ["ALL_TOOLS", "NAV_TOOLS", "CODING_TOOLS", "SECURITY_TOOLS", "WEB_TOOLS",
-           "HISAR_TOOLS", "NOTIFY_TOOLS", "ASK_TOOLS", "MEMORY_TOOLS", "GIT_TOOLS", "Memory",
-           "RememberAboutOwner",
+           "HISAR_TOOLS", "NOTIFY_TOOLS", "ASK_TOOLS", "MEMORY_TOOLS", "RECALL_TOOLS",
+           "GIT_TOOLS", "Memory", "RememberAboutOwner", "RecallConversations", "ReadAgentChannel",
            "RunCommand", "ReadFile", "WriteFile", "EditFile", "Grep", "Glob",
            "GraphQuery", "GraphPath", "GraphOverview", "GraphIndex", "Diagnostics", "WebSearch", "WebFetch",
            "TodoWrite", "EnterWorktree", "ExitWorktree", "TaskTool", "ClaudeCode",

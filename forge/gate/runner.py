@@ -15,7 +15,9 @@ from typing import Any, Awaitable, Callable
 
 from forge.agents import conventions, owner_memory
 from forge.agents.config import AgentConfig
+from forge.agents.memory_protocol import memory_protocol_fragment
 from forge.agents.prompt import PromptFragment, compose_system_prompt
+from forge.agents.roster import network_fragment
 from forge.agents.registry import AgentRegistry
 from forge.cell.base import CellPolicy
 from forge.cell.factory import build_cell
@@ -36,6 +38,7 @@ from forge.warden.toolsource import (
     resolve_optional,
     without_graph_tools,
     without_memory_tools,
+    without_recall_tools,
 )
 from forge.warden.filestate import FileStateCache
 from forge.warden.todos import TodoList
@@ -233,9 +236,12 @@ async def run_job(
             # The owner's memory needs a live channel to Mark VI, and a job that
             # has none must not be offered the tool: the memory block in its
             # prompt already tells it to use one, and a tool that can only fail
-            # turns that into a wasted call and a wrong conclusion.
+            # turns that into a wasted call and a wrong conclusion. Recall over
+            # past sessions and the agent channel reach Mark VI over the same
+            # socket, so they fall on the same side of the same test.
             if ctx.memory is None:
                 built = without_memory_tools(built)
+                built = without_recall_tools(built)
             live = ctx.graph
             if live is not None and getattr(live, "available", False):
                 return built
@@ -253,9 +259,23 @@ async def run_job(
         # forge/agents/owner_memory.py on why that cache is read-only.
         owner_memory.remember(request.memory_block)
         owner_fragment = owner_memory.live_fragment(request.memory_block)
+        # Who the other agents are, so a peer knows it is not the only one
+        # serving the owner. Built from the Forge registry (which already knows
+        # every sibling), not from Mark VI — so it holds even offline; the
+        # channel tools it points at are gated on the same connection they need.
+        roster_fragment = network_fragment(
+            registry, cfg.agent_id, has_channel=ctx.memory is not None)
+        # The obey-and-feed discipline for that block: without it the peer
+        # receives the owner's standing rules and never writes down a new one,
+        # so a rule stated in one session is gone by the next. Mark VI's own
+        # agents get this from prompts/core/08_memory + 11_patterns; the peer
+        # runs its own prompt and had neither (forge/agents/memory_protocol.py).
+        memory_fragment = memory_protocol_fragment(has_channel=ctx.memory is not None)
         system_prompt = compose_system_prompt([
             PromptFragment("profile", cfg.system_prompt),
             *([owner_fragment] if owner_fragment else []),
+            memory_fragment,
+            *([roster_fragment] if roster_fragment else []),
             *([repo_conventions] if repo_conventions else []),
             *([_UNATTENDED_FRAGMENT] if request.unattended else []),
             *(fragments or []),

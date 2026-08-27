@@ -75,7 +75,7 @@ from forge.warden.subagents import SubagentRunner
 from forge.warden.tool import ToolContext
 from forge.warden.toolsource import (close_providers, fold_providers,
                                      resolve_optional, without_graph_tools,
-                                     without_memory_tools)
+                                     without_memory_tools, without_recall_tools)
 
 
 async def run_repl(agent: str = "optimus", workspace: Path | None = None,
@@ -565,8 +565,10 @@ async def _run_turn(prompt: Any, session: Session, settings: ForgeSettings,
         The owner's memory goes for the same reason and permanently: it lives
         in Mark VI, this path never has Mark VI on the other end, and unlike a
         graph nothing here can bring one into existence mid-session. The
-        offline snapshot in the system prompt already says so in words."""
-        available = without_memory_tools(session.tools)
+        offline snapshot in the system prompt already says so in words. Recall
+        over past sessions and the agent channel reach Mark VI over the same
+        absent socket, so they go with it."""
+        available = without_recall_tools(without_memory_tools(session.tools))
         live = ctx.graph
         if live is not None and getattr(live, "available", False):
             return available
@@ -717,14 +719,21 @@ def _system_prompt(session: Session, extensions) -> str:
     so stale facts are not stated as current. See forge/agents/owner_memory.py.
     """
     from forge.agents import conventions, owner_memory
+    from forge.agents.memory_protocol import memory_protocol_fragment
     from forge.agents.prompt import PromptFragment, compose_system_prompt
 
     repo = conventions.fragment(session.workspace)
     owner = owner_memory.offline_fragment()
     location = _workspace_location_fragment(session)
+    # The obey-and-feed discipline for the snapshot — offline form, so it points
+    # at remember_about_owner (which needs no channel) rather than the withheld
+    # memory tool. Only when there is actually a snapshot to obey; with no cached
+    # block there is nothing for it to refer to.
+    memory_protocol = memory_protocol_fragment(has_channel=False) if owner else None
     return compose_system_prompt([
         PromptFragment("profile", session.cfg.system_prompt),
         *([owner] if owner else []),
+        *([memory_protocol] if memory_protocol else []),
         *([location] if location else []),
         *([repo] if repo else []),
         *extensions.fragments,

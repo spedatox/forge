@@ -100,6 +100,19 @@ def without_memory_tools(tools: dict[str, Tool]) -> dict[str, Tool]:
             if name not in MEMORY_TOOL_NAMES}
 
 
+#: Recall over past sessions and the shared agent channel. Reached over the SAME
+#: peer socket the memory tool uses, so they are withheld on the same condition
+#: and at the same point: no channel to Mark VI, no tools. Kept as a separate set
+#: from MEMORY_TOOL_NAMES only because the two are distinct capabilities a profile
+#: takes on purpose — the withholding rule is identical (ctx.memory is None).
+RECALL_TOOL_NAMES = ("recall_conversations", "read_agent_channel")
+
+
+def without_recall_tools(tools: dict[str, Tool]) -> dict[str, Tool]:
+    return {name: tool for name, tool in tools.items()
+            if name not in RECALL_TOOL_NAMES}
+
+
 def resolve_optional(tools: dict[str, Tool]) -> dict[str, Tool]:
     """Drop every optional group this deployment cannot actually serve.
 

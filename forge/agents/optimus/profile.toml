@@ -77,6 +77,14 @@ vision_model = "claude-sonnet-4-6"
 # bot (warden/toolsource.py), so naming them here is not a claim that either is
 # configured.
 #
+# "recall" is the read side of Mark VI's memory: recall_conversations searches
+# every past session by meaning (this peer is stateless between turns, so it is
+# the only way back to a conversation that is not the current one), and
+# read_agent_channel shows what the other agents — Centurion among them — have
+# been doing. Separate from "memory" because it is retrieval, not the power to
+# rewrite what every agent believes; withheld with "memory" when there is no
+# Mark VI channel, so the standalone TUI is unaffected. See forge/tools/recall.py.
+#
 # "remember_about_owner" is named individually rather than pulled in through
 # "memory": it queues a note about the owner LOCALLY and needs no connection at
 # all, so it stays available in exactly the run where "memory" gets withheld —
@@ -87,7 +95,7 @@ vision_model = "claude-sonnet-4-6"
 # group holds it OUTSIDE the Cell so the token is never exposed to executed code.
 # Withheld automatically when no FORGE_GIT_TOKEN is configured for this agent, so
 # naming it here is not a claim the credential exists — see forge/tools/gitpush.py.
-tools = ["coding", "web", "memory", "hisar", "notify", "git", "remember_about_owner"]
+tools = ["coding", "web", "memory", "recall", "hisar", "notify", "git", "remember_about_owner"]
 
 # One working mode with the safety gate always on; "plan" would make it
 # read-only for review (§6).
