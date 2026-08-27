@@ -272,36 +272,72 @@ describe a write-only vault months after reads were opened.
 
 ### What the deploy account needs
 
-The clone is owned by **root** (§1 installs it as root, and `forge@.service` has
-no `User=` so systemd runs it as root), while CI connects as `SSH_USER`. That
-split is deliberate: the service needs the docker socket, and the deploy account
-gets no general sudo — `/etc/sudoers.d/forgedeploy` matches the exact command
-lines the workflow uses, which is why those are spelled out verbatim there and
-the unit path is not a variable.
+The clone, the venv and the service are all owned by **root** (§1 installs the
+tree as root, and `forge@.service` has no `User=` so systemd runs the peer as
+root), while CI connects as `SSH_USER`. That split is deliberate: the service
+needs the docker socket, and the deploy account gets no general sudo —
+`/etc/sudoers.d/forgedeploy` matches the exact command lines the workflow uses,
+which is why those are spelled out verbatim there and the paths are not
+variables.
 
-Git ≥ 2.35.2 refuses to touch a tree owned by another user, so a fresh host
-fails its first deploy with:
+Because the tree is root's, the tree-**mutating** half of the deploy — the git
+fetch/reset and the editable pip install — must run **as root**, not as the
+deploy user. Run as the deploy user, a `git fetch` downloads new objects and
+then cannot write them into root's `.git/objects`, and dies on every push that
+carries new commits with:
 
 ```
-fatal: detected dubious ownership in repository at '***'
+error: insufficient permission for adding an object to repository database .git/objects
+fatal: failed to write object
+fatal: unpack-objects failed
 ```
 
-The workflow now declares the exception itself, idempotently, before its first
-git command — so a rebuilt host works on the first run rather than needing a
-step nobody wrote down. Doing it by hand is the same line, as the deploy user:
-
-```bash
-git config --global --add safe.directory /opt/forge-mk1
-```
+An earlier `git config --global --add safe.directory /opt/forge-mk1` was
+mistaken for the fix for this. It is not: `safe.directory` silences git's
+*dubious ownership* WARNING, but it never grants the *write*, so the fetch still
+fails one step later at unpack. The workflow therefore runs those steps through
+`deploy/remote-sync.sh`, invoked as `sudo /usr/local/sbin/forge-sync`.
 
 Do **not** "fix" this by chowning the tree to the deploy user. It only inverts
 the mismatch: the root service writes `__pycache__` back into the same tree, and
 the next `git status` complains from the other side.
 
-### By hand, when CI cannot
+#### One-time host bootstrap (root)
+
+The workflow calls `sudo /usr/local/sbin/forge-sync`, so a host needs that
+script installed and two sudoers lines added **once**, by hand as root (the CI
+account cannot grant itself sudo). On a host whose tree predates this file, run
+the by-hand sync below first so `deploy/remote-sync.sh` exists in the tree, then:
 
 ```bash
-cd /opt/forge-mk1 && git fetch origin main && git reset --hard origin/main
-./.venv/bin/pip install -e ".[providers]"   # only when dependencies changed
-systemctl restart forge@optimus forge@centurion
+# install the root-run sync script (mode 755: readable so CI can `cmp` it)
+install -m 755 -o root -g root /opt/forge-mk1/deploy/remote-sync.sh /usr/local/sbin/forge-sync
+
+# grant the deploy account exactly these two root commands (visudo -f):
+#   /etc/sudoers.d/forgedeploy
+<SSH_USER> ALL=(root) NOPASSWD: /usr/local/sbin/forge-sync
+<SSH_USER> ALL=(root) NOPASSWD: /usr/bin/install -m 755 -o root -g root /opt/forge-mk1/deploy/remote-sync.sh /usr/local/sbin/forge-sync
+```
+
+After that, CI keeps the installed script current on its own — it reinstalls it
+whenever `deploy/remote-sync.sh` changes, exactly as it does the unit file.
+
+### By hand, when CI cannot
+
+As **root** (the tree is root's — the same reason CI runs these through sudo).
+This is exactly what `deploy/remote-sync.sh` does, plus the restart:
+
+```bash
+sudo /usr/local/sbin/forge-sync              # fetch + reset --hard + editable install
+sudo systemctl restart forge@optimus forge@centurion
+```
+
+Before the host is bootstrapped (no `forge-sync` yet), run the steps directly as
+root — never as the deploy user, or the fetch fails at `unpack-objects`:
+
+```bash
+sudo git -C /opt/forge-mk1 fetch --prune origin main
+sudo git -C /opt/forge-mk1 reset --hard origin/main
+sudo /opt/forge-mk1/.venv/bin/python -m pip install -q -e ".[providers]"   # only when deps changed
+sudo systemctl restart forge@optimus forge@centurion
 ```

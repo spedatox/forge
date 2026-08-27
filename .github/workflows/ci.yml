@@ -172,31 +172,30 @@ jobs:
             set -euo pipefail
             cd "${{ secrets.DEPLOY_PATH }}"
 
-            # The clone is owned by root (deploy/README.md installs it as root,
-            # and forge@.service has no User= so systemd runs it as root), but
-            # this script runs as the deploy account. Git 2.35.2+ refuses to
-            # operate on a tree owned by someone else — "detected dubious
-            # ownership" — and exits 128 before doing anything.
+            # The clone, the venv and the service are all owned by ROOT
+            # (deploy/README.md §"What the deploy account needs": §1 installs the
+            # tree as root, and forge@.service has no User= so systemd runs the
+            # peer as root). This SSH script runs as the deploy account, which has
+            # no general sudo — so the tree-MUTATING half of the deploy runs as
+            # root through the same exact-command sudoers mechanism the systemctl
+            # calls below use.
             #
-            # Declared here rather than left as a manual step on the box: the
-            # pipeline exists because "whatever someone last did by hand" was
-            # 26 commits behind, and a deploy that depends on undocumented
-            # server state is the same failure wearing a different hat. A
-            # rebuilt host works on the first run.
+            # This is the fix for the failure that hit EVERY push: a `git fetch`
+            # run as the deploy user cannot write the objects it just downloaded
+            # into root's .git/objects, and dies with "insufficient permission
+            # for adding an object to repository database .git/objects", exit 128.
+            # `git config safe.directory` (what used to be here) only silenced
+            # git's ownership WARNING — it never granted the write, which is the
+            # failure it was mistaken for a fix for. Running the fetch as root, the
+            # owner of the tree, is what actually resolves it. Do NOT instead chown
+            # the tree to the deploy user: the root service writes __pycache__ back
+            # into it and the mismatch just inverts (deploy/README.md).
             #
-            # Idempotent: --add appends unconditionally, so without the check
-            # every deploy would grow ~/.gitconfig by one more identical line.
-            if ! git config --global --get-all safe.directory 2>/dev/null \
-                 | grep -Fxq "${{ secrets.DEPLOY_PATH }}"; then
-              echo "marking ${{ secrets.DEPLOY_PATH }} as a safe directory"
-              git config --global --add safe.directory "${{ secrets.DEPLOY_PATH }}"
-            fi
-
-            # The sudoers rules below match on an exact command line, so the
-            # unit-file path is hardcoded and CANNOT be a variable. That makes
-            # DEPLOY_PATH and that literal two statements of the same fact —
-            # check them here, where the message can say so, rather than at the
-            # sudo call, where it fails as an unexplained permission denial.
+            # The sudoers rules match on an exact command line, so the paths below
+            # are hardcoded and CANNOT be variables. That makes DEPLOY_PATH and
+            # those literals two statements of one fact — checked here, where the
+            # message can say so, rather than at the sudo call where it fails as an
+            # unexplained permission denial.
             if [ "${{ secrets.DEPLOY_PATH }}" != "/opt/forge-mk1" ]; then
               echo "::error::DEPLOY_PATH is not /opt/forge-mk1, but the sudoers"
               echo "::error::rules in /etc/sudoers.d/forgedeploy hardcode that"
@@ -204,15 +203,15 @@ jobs:
               exit 1
             fi
 
-            # Mirror main exactly. .env and .env.<agent> are gitignored and so
-            # survive; the venv lives in .venv and is likewise untracked.
-            git fetch --prune origin main
-            git reset --hard origin/main
-
-            # forge is installed editable, so code is live after the reset —
-            # but a new dependency in pyproject.toml would not be. Cheap when
-            # nothing has changed.
-            .venv/bin/python -m pip install -q -e ".[providers]"
+            # Fetch + reset + editable install, AS ROOT (see above). The steps
+            # live in a root-owned script rather than three whitelisted command
+            # lines because sudoers glob-matches arguments and `pip install -e
+            # .[providers]` carries a literal `[providers]` sudoers would read as a
+            # character class — one script path steps around that landmine and
+            # keeps every mutable argument on root's side of the trust boundary.
+            # If this fails with "command not found" or a sudo denial, the host
+            # has not been bootstrapped yet — see deploy/README.md.
+            sudo /usr/local/sbin/forge-sync
 
             # A fresh host has no per-agent Cell images at all, which surfaces
             # only at JOB time as `Unable to find image 'forge-cell-optimus:
@@ -248,6 +247,18 @@ jobs:
                   -t forge-cell-centurion:latest deploy/
             else
               echo "::warning::deploy account cannot reach docker; skipping Cell image build (peer uses existing images; build by hand per deploy/README.md or add the deploy user to the docker group)."
+            fi
+
+            # The root-run sync script is version-controlled too, and kept
+            # current the same way the unit file is: installed from the tree only
+            # when it differs. A change to it therefore takes effect from the NEXT
+            # deploy — this one already ran the previous version, which is what
+            # fetched the change. `cmp` needs no sudo: forge-sync is mode 755
+            # (readable, not secret), so the deploy account can compare it.
+            if ! cmp -s deploy/remote-sync.sh /usr/local/sbin/forge-sync; then
+              echo "sync script changed — installing"
+              sudo /usr/bin/install -m 755 -o root -g root \
+                /opt/forge-mk1/deploy/remote-sync.sh /usr/local/sbin/forge-sync
             fi
 
             # The unit file is version-controlled. Sync it only when it
