@@ -65,6 +65,22 @@ RETRY_BASE_DELAY_S = 2.0
 _WRITE_TOOLS = frozenset({"write_file", "edit_file"})
 _CHECK_TOOLS = frozenset({"run_command"})
 
+# What counts as persisting a durable fact to the owner's memory. `memory` with a
+# write command reaches the store directly; `remember_about_owner` queues it for
+# the store even with no channel. A `memory view` is a read and is not here — the
+# point is whether a stated rule was WRITTEN DOWN, not merely looked up.
+_MEMORY_WRITE_COMMANDS = frozenset({"create", "str_replace", "insert"})
+
+
+def _persists_to_memory(tu) -> bool:
+    """Whether one tool call wrote a durable fact to the owner's memory."""
+    if tu.name == "remember_about_owner":
+        return True
+    if tu.name == "memory":
+        return (tu.input or {}).get("command") in _MEMORY_WRITE_COMMANDS
+    return False
+
+
 _VERIFY_PROMPT = (
     "Before you finish: you changed files this turn and did not run anything "
     "afterwards, so nothing here has been shown to work.\n\n"
@@ -74,6 +90,23 @@ _VERIFY_PROMPT = (
     "tell the operator what you did NOT verify. An honest 'I could not check "
     "this' is useful; a confident summary of untested work is the single most "
     "expensive thing you can hand back, because it looks exactly like success."
+)
+_RULE_CAPTURE_PROMPT = (
+    "Before you finish: the owner stated something this turn that reads as a "
+    "STANDING rule — how he wants his work done from here on, not a one-off for "
+    "this task — and you have not written it down. A rule you only obey this "
+    "turn is gone by the next session; you are stateless between turns, and the "
+    "owner's memory is the only thing that carries it forward.\n\n"
+    "Record it NOW, in the same turn, in the one right place:\n"
+    "  - a standing preference or working rule → append it to the matching "
+    "`dossier/*` file with the `memory` tool (`view` it, then `str_replace` your "
+    "line in), attributed and dated `[YYYY-MM-DD, <your agent id>]`;\n"
+    "  - if you have no channel to Mark VI this run, use `remember_about_owner` "
+    "instead — it queues the fact and reaches memory on reconnect.\n\n"
+    "If what he said was genuinely NOT a standing rule — a one-off for this task, "
+    "or something already recorded — say so in one line and finish. Do not just "
+    "acknowledge the rule in prose: 'noted' is not a memory write, and next "
+    "session there is no prose to read."
 )
 _MAX_BACKOFF_S = 30.0
 
@@ -336,6 +369,17 @@ class Warden:
                     state.messages.append({"role": "user", "content": _VERIFY_PROMPT})
                     state.transitions.append(
                         Transition(ContinueReason.NEXT_TURN, "unverified changes"))
+                    continue
+                # A standing rule the owner stated this turn and the agent is
+                # about to walk away from without recording. Same shape as the
+                # verification gate: nudge once, continue the turn so the write
+                # can happen now, and let the agent decline in words if it was
+                # not a rule after all.
+                if self._unsaved_rule(state):
+                    state.rule_capture_nudged = True
+                    state.messages.append({"role": "user", "content": _RULE_CAPTURE_PROMPT})
+                    state.transitions.append(
+                        Transition(ContinueReason.NEXT_TURN, "unsaved standing rule"))
                     continue
                 await self.emit({"type": "done", "data": turn.text})
                 return self._terminal(StopReason.COMPLETED, state)
@@ -743,6 +787,8 @@ class Warden:
                 state.wrote_at = state.iteration
             elif tu.name in _CHECK_TOOLS:
                 state.checked_at = state.iteration
+            if _persists_to_memory(tu):
+                state.memory_wrote = True
 
     def _unverified(self, state: LoopState) -> bool:
         """Did this job change code and then stop without running anything?
@@ -758,6 +804,32 @@ class Warden:
         return (state.wrote_at > 0
                 and state.checked_at < state.wrote_at
                 and not state.verification_nudged)
+
+    def _unsaved_rule(self, state: LoopState) -> bool:
+        """Did the owner state a standing rule THIS turn that was never written?
+
+        The prompt already tells the agent to file such a rule; this is the
+        backstop for the turn it does not — the failure the owner actually
+        reports, an instruction obeyed once and forgotten by the next session.
+
+        Only the CURRENT turn's message is examined (`operator_turns[-1]`), never
+        the whole history: a rule the owner stated three turns ago and the agent
+        saved then is not this run's business, and re-deriving it from the
+        transcript every turn would nag about a rule that is already filed.
+
+        Gated on a tool that can actually record it — without `memory` or
+        `remember_about_owner` in the set there is nowhere to send the agent, and
+        a nudge with no available action is the harness talking to itself. Asked
+        once, like the verification nudge, for the same reason: the honest answer
+        is sometimes 'that was not a standing rule', which the agent can see and
+        the loop cannot."""
+        if state.memory_wrote or state.rule_capture_nudged:
+            return False
+        if not state.operator_turns:
+            return False
+        if "memory" not in self.tools and "remember_about_owner" not in self.tools:
+            return False
+        return reminders.looks_like_standing_rule(state.operator_turns[-1])
 
     async def _wind_down(self, state: LoopState) -> Terminal:
         """The ceiling is reached. Ask for a handover instead of cutting the

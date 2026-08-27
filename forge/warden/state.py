@@ -84,6 +84,18 @@ class LoopState:
     Once per job: a second ask is nagging, and an agent that declined the first
     has a reason the loop cannot see."""
 
+    memory_wrote: bool = False
+    """Whether this run persisted anything to the owner's memory — a `memory`
+    write command or `remember_about_owner`. The evidence that a standing rule
+    the owner stated this turn was actually captured rather than merely obeyed
+    once. A read (`memory view`) is not a write and does not set it."""
+
+    rule_capture_nudged: bool = False
+    """Whether the loop has already asked, once, for a stated standing rule to be
+    written down. Once per job, on the same reasoning as `verification_nudged`:
+    an agent that declined the first ask ('this was not a standing rule') has a
+    reason the loop cannot see, and a second ask is nagging."""
+
     compact_failures: int = 0
     """Consecutive failed attempts to reclaim context. Past a small limit Forge
     stops trying: a context that cannot be reduced will not become reducible on

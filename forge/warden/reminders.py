@@ -130,6 +130,56 @@ REMINDERS: tuple[Reminder, ...] = (
 )
 
 
+# ── Standing-rule detection ──────────────────────────────────────────────────
+#
+# A standing rule is an instruction meant to hold BEYOND this turn — "keep the
+# workspace clean and structured", "always run the tests first", "never push to
+# main". The memory-protocol fragment tells the agent to write one down; this is
+# the backstop for the turn it does not, and it can only be a backstop if it can
+# recognise the shape of such an instruction in the owner's own words.
+#
+# Precision over recall, deliberately. A false positive nags the agent to file
+# something that was not a rule — the wallpaper failure a reminder system dies
+# of — so the signals stay to phrasings that are hard to read any other way than
+# "this is how I want it done from here on". A rule this misses is still caught
+# by the prompt fragment; a rule this invents wastes a turn. The two languages
+# are the two the owner actually uses (CLAUDE.md: single-user, Turkish/English).
+_RULE_SIGNALS = (
+    # English — standing scope
+    "always", "never", "from now on", "from here on", "going forward",
+    "in future", "in the future", "henceforth", "every time", "each time",
+    "whenever you", "as a rule", "by default", "make sure to", "make sure you",
+    "be sure to", "remember to", "don't forget to", "do not forget to",
+    "you should always", "i want you to always",
+    # Turkish — standing scope
+    "her zaman", "asla", "bundan sonra", "bundan böyle", "her seferinde",
+    "daima", "sakın", "kural olarak", "temiz tut", "düzenli tut",
+    "hep ", "artık ",
+)
+
+# "keep the workspace clean" carries no always/never — it is imperative
+# maintenance, caught by "keep" co-occurring with a tidiness word. Kept separate
+# because "keep" alone ("keep the server running") is not a standing rule about
+# how work is done.
+_KEEP_MAINTENANCE_WORDS = (
+    "clean", "tidy", "organized", "organised", "structured", "neat",
+    "in order", "updated", "up to date", "consistent", "uncluttered",
+)
+
+
+def looks_like_standing_rule(text: str) -> bool:
+    """Whether the owner's message reads as an instruction meant to persist.
+
+    A heuristic on purpose, and a conservative one: it is the trigger for a
+    single, decline-able nudge, not a classifier anything downstream trusts."""
+    if not text:
+        return False
+    t = text.lower()
+    if any(sig in t for sig in _RULE_SIGNALS):
+        return True
+    return "keep" in t and any(w in t for w in _KEEP_MAINTENANCE_WORDS)
+
+
 def file_changed_notice(paths: list[str]) -> str:
     """Files the model has read that something else has since rewritten.
 
