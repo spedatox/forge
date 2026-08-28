@@ -1,5 +1,9 @@
-# F.O.R.G.E.
-### **F**ramework of **O**perational **R**untime & **G**ated **E**xecution.
+<p align="center">
+  <img src="forge.png" alt="Forge logo" width="200" height="200">
+</p>
+
+<h1 align="center">F.O.R.G.E.</h1>
+<p align="center"><b>F</b>ramework of <b>O</b>perational <b>R</b>untime &amp; <b>G</b>ated <b>E</b>xecution.</p>
 
 A coding agent that runs on your machine or on a server, with sandboxed
 execution and a permission gate in front of anything irreversible.
