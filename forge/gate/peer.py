@@ -440,8 +440,32 @@ class ForgePeer:
         signal = asyncio.Event()
         self._chats[request.job_id] = signal
 
-        async def sink(_ev: JobEvent) -> None:      # fire-and-await: no streaming
-            return None
+        async def sink(ev: JobEvent) -> None:
+            """Stream progress alongside the single task_result.
+
+            A dispatch is fire-and-await on the wire — one `task_dispatch` out,
+            one `task_result` back — and this used to discard every event in
+            between, which made a backgrounded job a black box: the owner
+            watched a "running" row for minutes with nothing behind it and no
+            way to tell work from a wedge.
+
+            The frames are ADDITIVE (law 3) and advisory: a `task_event` is
+            routed to the tray's run registry if Mark VI is tracking this job
+            and dropped silently if it is not, so an older backend that has
+            never heard of the type simply ignores it. Nothing here can fail
+            the job — a send that raises (socket gone mid-run) is swallowed,
+            because losing a progress frame must never cost the actual result.
+            """
+            if ev.type not in _CHAT_FORWARD:
+                return
+            try:
+                await self._send({
+                    "type": "task_event", "agent_id": self.cfg.agent_id,
+                    "task_id": request.job_id,
+                    "event": job_event_to_chat_event(ev),
+                })
+            except Exception:  # noqa: BLE001 — progress is never worth the job
+                pass
 
         try:
             term = await run_job(request, settings=self.settings, registry=self.registry,
