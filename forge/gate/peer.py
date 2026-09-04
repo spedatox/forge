@@ -46,6 +46,13 @@ logger = logging.getLogger("forge.gate.peer")
 _BACKOFF_START_S = 1.0
 _BACKOFF_MAX_S = 60.0
 _HEARTBEAT_S = 30.0
+# How long a connection must have lasted to count as "this endpoint works", and
+# so to earn a reset of the reconnect delay. Comfortably above a handshake that
+# fails on arrival (bad key, wrong URL — those die in well under a second) and
+# well below the interval at which a healthy socket actually drops, so a peer
+# that has been serving for hours reconnects in ~1s while a broken one still
+# climbs to the ceiling.
+_STABLE_S = 30.0
 # A chat that emits no frame for this long is logged as stalled. Purely
 # diagnostic — Mark VI's ExternalAgentProxy times the stream out at 300s; this
 # fires first so the peer's own logs show WHICH chat went quiet and when (the
@@ -120,16 +127,36 @@ class ForgePeer:
     # ── Connection lifecycle ─────────────────────────────────────────────────
     async def run_forever(self) -> None:
         backoff = _BACKOFF_START_S
+        loop = asyncio.get_running_loop()
         while not self._shutdown and not self._stop.is_set():
+            started = loop.time()
             try:
                 await self._serve_one()
-                backoff = _BACKOFF_START_S
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001
                 logger.warning("peer_connection_lost", extra={"error": f"{type(e).__name__}: {e}"})
             if self._shutdown or self._stop.is_set():
                 break
+            # Reset the backoff after a connection that actually WORKED, judged
+            # by how long it lasted rather than by how _serve_one returned.
+            #
+            # This line used to live inside the `try`, right after the await —
+            # which meant it ran only on a clean return, and a clean return only
+            # happens on shutdown. Every ordinary disconnect raises, so the reset
+            # was dead code: the delay doubled 1→2→4→…→60 and then stayed at 60s
+            # for the life of the process. On the server that saturated within
+            # minutes of boot, so a peer that had been up for days took a FULL
+            # MINUTE to come back from every drop, and a task dispatched inside
+            # that window found no peer registered at all — the "Optimus doesn't
+            # answer" the operator was seeing, once per drop, all day.
+            #
+            # Gated on a minimum session length so the exponential climb still
+            # does its real job: a genuinely broken endpoint (bad URL, rejected
+            # key, backend down) fails fast and repeatedly, never reaches
+            # _STABLE_S, and still backs off instead of hammering.
+            if loop.time() - started >= _STABLE_S:
+                backoff = _BACKOFF_START_S
             logger.info("peer_reconnect", extra={"in_s": backoff})
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=backoff)

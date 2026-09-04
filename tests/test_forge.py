@@ -303,3 +303,102 @@ def test_stop_request_ends_an_idle_connection(monkeypatch):
 
     asyncio.run(scenario())                 # TimeoutError here = the bug is back
     assert sock.closed, "the socket should be closed on the way out"
+
+
+def _reconnect_delays(caplog):
+    """The `in_s` values run_forever logged on peer_reconnect, in order."""
+    return [r.in_s for r in caplog.records if r.getMessage() == "peer_reconnect"]
+
+
+def test_backoff_resets_after_a_connection_that_lasted(monkeypatch, caplog):
+    """A long-lived socket that drops must come back promptly, not at the ceiling.
+
+    Regression: `backoff = _BACKOFF_START_S` sat inside the try block after
+    `await self._serve_one()`, but every ordinary disconnect leaves _serve_one
+    by raising, so the reset was unreachable. The delay climbed 1→2→4→…→60 and
+    stayed pinned at the ceiling for the life of the process — on the server a
+    peer up for days took a FULL MINUTE to re-register after each drop, and a
+    task dispatched inside that window found no peer registered at all.
+    """
+    import logging
+
+    import forge.gate.peer as peer_mod
+    from forge.agents.registry import AgentRegistry
+    from forge.config import ForgeSettings
+    from forge.gate.peer import ForgePeer
+
+    monkeypatch.setenv("SPEDA_API_KEY", "test-key")
+    # Scaled down so the test does not sit through real backoffs; the ratios
+    # (start ≪ max, session ≫ stable) are what is under test.
+    monkeypatch.setattr(peer_mod, "_BACKOFF_START_S", 0.01)
+    monkeypatch.setattr(peer_mod, "_BACKOFF_MAX_S", 0.64)
+    monkeypatch.setattr(peer_mod, "_STABLE_S", 0.05)
+
+    registry = AgentRegistry.load()
+    peer = ForgePeer(registry.get("optimus"), ForgeSettings.from_env(), registry)
+
+    sessions = {"n": 0}
+
+    async def serve_then_drop():
+        # Up comfortably past _STABLE_S, then dropping the way a real socket
+        # does: by raising out of _serve_one.
+        sessions["n"] += 1
+        if sessions["n"] > 3:
+            peer.request_stop()
+            return
+        await asyncio.sleep(0.08)
+        raise ConnectionError("peer closed the socket")
+
+    monkeypatch.setattr(peer, "_serve_one", serve_then_drop)
+
+    with caplog.at_level(logging.INFO, logger="forge.gate.peer"):
+        asyncio.run(asyncio.wait_for(peer.run_forever(), timeout=5.0))
+
+    delays = _reconnect_delays(caplog)
+    assert delays, "expected at least one reconnect delay"
+    assert all(d == 0.01 for d in delays), (
+        f"a session that outlived _STABLE_S must reset the delay to the floor; "
+        f"got {delays} — the backoff is pinned again"
+    )
+
+
+def test_backoff_still_climbs_when_the_endpoint_is_broken(monkeypatch, caplog):
+    """The exponential climb must survive the fix above.
+
+    A connection that fails on arrival (bad key, wrong URL, backend down) never
+    reaches _STABLE_S, so it must still back off rather than hammer the socket
+    at the floor delay forever.
+    """
+    import logging
+
+    import forge.gate.peer as peer_mod
+    from forge.agents.registry import AgentRegistry
+    from forge.config import ForgeSettings
+    from forge.gate.peer import ForgePeer
+
+    monkeypatch.setenv("SPEDA_API_KEY", "test-key")
+    monkeypatch.setattr(peer_mod, "_BACKOFF_START_S", 0.01)
+    monkeypatch.setattr(peer_mod, "_BACKOFF_MAX_S", 0.64)
+    monkeypatch.setattr(peer_mod, "_STABLE_S", 30.0)
+
+    registry = AgentRegistry.load()
+    peer = ForgePeer(registry.get("optimus"), ForgeSettings.from_env(), registry)
+
+    attempts = {"n": 0}
+
+    async def fail_immediately():
+        attempts["n"] += 1
+        if attempts["n"] > 4:
+            peer.request_stop()
+            return
+        raise ConnectionRefusedError("connection refused")
+
+    monkeypatch.setattr(peer, "_serve_one", fail_immediately)
+
+    with caplog.at_level(logging.INFO, logger="forge.gate.peer"):
+        asyncio.run(asyncio.wait_for(peer.run_forever(), timeout=5.0))
+
+    delays = _reconnect_delays(caplog)
+    assert delays[:4] == [0.01, 0.02, 0.04, 0.08], (
+        f"a never-established endpoint must still climb; got {delays}"
+    )
