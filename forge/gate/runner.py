@@ -274,8 +274,7 @@ async def run_job(
         # so a rule stated in one session is gone by the next. Mark VI's own
         # agents get this from prompts/core/08_memory + 11_patterns; the peer
         # runs its own prompt and had neither (forge/agents/memory_protocol.py).
-        memory_fragment = None if identity_free else memory_protocol_fragment(
-            has_channel=ctx.memory is not None)
+        memory_fragment = None if identity_free else memory_protocol_fragment(has_channel=ctx.memory is not None)
         system_prompt = compose_system_prompt([
             PromptFragment("profile", cfg.system_prompt),
             *([owner_fragment] if owner_fragment else []),
