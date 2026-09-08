@@ -103,6 +103,7 @@ async def run_job(
     memory: Any | None = None,
     cell_pool: "CellPool | None" = None,
     inbox: "Inbox | None" = None,
+    identity_free: bool = False,
 ) -> Terminal:
     """Run one job to a single Terminal, streaming JobEvents via `emit`.
 
@@ -257,24 +258,28 @@ async def run_job(
         # What Mark VI knows about the owner. Cached to disk on the way past so
         # a standalone run still has it when the backend is unreachable — see
         # forge/agents/owner_memory.py on why that cache is read-only.
-        owner_memory.remember(request.memory_block)
-        owner_fragment = owner_memory.live_fragment(request.memory_block)
+        if identity_free:
+            owner_fragment = None
+        else:
+            owner_memory.remember(request.memory_block)
+            owner_fragment = owner_memory.live_fragment(request.memory_block)
         # Who the other agents are, so a peer knows it is not the only one
         # serving the owner. Built from the Forge registry (which already knows
         # every sibling), not from Mark VI — so it holds even offline; the
         # channel tools it points at are gated on the same connection they need.
-        roster_fragment = network_fragment(
+        roster_fragment = None if identity_free else network_fragment(
             registry, cfg.agent_id, has_channel=ctx.memory is not None)
         # The obey-and-feed discipline for that block: without it the peer
         # receives the owner's standing rules and never writes down a new one,
         # so a rule stated in one session is gone by the next. Mark VI's own
         # agents get this from prompts/core/08_memory + 11_patterns; the peer
         # runs its own prompt and had neither (forge/agents/memory_protocol.py).
-        memory_fragment = memory_protocol_fragment(has_channel=ctx.memory is not None)
+        memory_fragment = None if identity_free else memory_protocol_fragment(
+            has_channel=ctx.memory is not None)
         system_prompt = compose_system_prompt([
             PromptFragment("profile", cfg.system_prompt),
             *([owner_fragment] if owner_fragment else []),
-            memory_fragment,
+            *([memory_fragment] if memory_fragment else []),
             *([roster_fragment] if roster_fragment else []),
             *([repo_conventions] if repo_conventions else []),
             *([_UNATTENDED_FRAGMENT] if request.unattended else []),
@@ -312,16 +317,17 @@ async def run_job(
         # and a narrower toolset — it shares the Cell (same workspace), the
         # model, the interrupt signal and the ledger, and differs only in
         # having its own message list. That difference is the entire point.
-        ctx.subagents = SubagentRunner(
-            build_warden=lambda **kw: Warden(
-                model=model, ctx=ctx, signal=signal, ledger=ledger,
-                retry_attempts=settings.retry_attempts,
-                retry_base_delay=settings.retry_base_delay_s,
-                **kw,          # includes the child's scoped emit
-            ),
-            parent_tools=lambda: tools,
-            emit=emit,
-        )
+        if not identity_free:
+            ctx.subagents = SubagentRunner(
+                build_warden=lambda **kw: Warden(
+                    model=model, ctx=ctx, signal=signal, ledger=ledger,
+                    retry_attempts=settings.retry_attempts,
+                    retry_base_delay=settings.retry_base_delay_s,
+                    **kw,          # includes the child's scoped emit
+                ),
+                parent_tools=lambda: tools,
+                emit=emit,
+            )
         # A chat turn carries the full prior transcript — seed the loop with it so
         # the agent remembers the conversation. A bare dispatch has no history and
         # runs single-shot on `task`. The transcript is repaired first: a previous
@@ -340,12 +346,13 @@ async def run_job(
         # only as a journal line. Awaited rather than fired-and-forgotten so it
         # cannot be cancelled by the teardown in `finally` — it is two HTTP
         # calls at most, and `send` never raises.
-        await notify.job_finished(
-            cfg.agent_id, request.task,
-            (terminal.final_text or "").strip(),
-            time.monotonic() - started,
-            ok=terminal.reason is StopReason.COMPLETED,
-        )
+        if not identity_free:
+            await notify.job_finished(
+                cfg.agent_id, request.task,
+                (terminal.final_text or "").strip(),
+                time.monotonic() - started,
+                ok=terminal.reason is StopReason.COMPLETED,
+            )
         return terminal
     except Exception as e:  # noqa: BLE001 — fail loud (§9.5) as a terminal error event
         logger.exception("run_job_failed")

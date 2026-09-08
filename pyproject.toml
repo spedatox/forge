@@ -1,7 +1,7 @@
 [project]
 name = "forge"
-version = "0.2.0"  # Mark II
-description = "The Forge — standalone privileged execution peer for S.P.E.D.A. Mark VI"
+version = "0.3.0"
+description = "Forge — isolated coding and security execution for agents"
 requires-python = ">=3.11"
 dependencies = [
     "pydantic>=2.6",

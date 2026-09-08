@@ -5,11 +5,13 @@
 <h1 align="center">F.O.R.G.E.</h1>
 <p align="center"><b>F</b>ramework of <b>O</b>perational <b>R</b>untime &amp; <b>G</b>ated <b>E</b>xecution.</p>
 
-A coding agent that runs on your machine or on a server, with sandboxed
-execution and a permission gate in front of anything irreversible.
+A coding and security execution runtime with sandboxed tools and a permission
+gate in front of anything irreversible.
 
-Forge provides a terminal interface for interactive work and a WebSocket peer
-interface for accepting jobs from SPEDA Mark VI. Both run the same engine.
+Forge provides a terminal interface for local interactive work and an
+identity-free Python runtime for orchestrators. On a Mark VI server it is used
+by anonymous Legion workers; Mark VI retains every persona, conversation,
+upload, model connection, and result record.
 
 ```bash
 ./install.sh            # Windows: .\install.ps1
