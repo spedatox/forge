@@ -2,9 +2,9 @@
 # Runs AS ROOT on the deploy host, invoked by CI through one whitelisted sudoers
 # line (deploy/README.md §"What the deploy account needs").
 #
-# WHY THIS EXISTS. The clone, the venv and the service are all root-owned: §1
-# installs the tree as root, and forge@.service has no `User=`, so systemd runs
-# the peer as root. CI connects as the deploy account, which has no general sudo.
+# WHY THIS EXISTS. The clone and venv are root-owned. CI connects as the deploy
+# account, which has no general sudo, while Igor imports this checkout from its
+# app container and executes jobs through anonymous Legion workers.
 # The half of the deploy that WRITES into that root-owned state cannot run as the
 # deploy user:
 #
@@ -19,9 +19,8 @@
 #
 # So the tree-mutating steps run here, as root, reached through the same
 # exact-command sudoers mechanism the systemctl calls in the workflow already
-# use. Chowning the tree to the deploy user is NOT the fix (deploy/README.md
-# says so at length): the root service writes __pycache__ back into it and the
-# ownership mismatch just inverts.
+# use. Chowning the tree to the deploy user is NOT the fix: the checkout and
+# deployment mechanism remain root-owned even though Igor imports it read-only.
 #
 # A wrapper rather than three whitelisted command lines on purpose: sudoers
 # glob-matches command arguments, and `pip install -e .[providers]` carries a
@@ -45,3 +44,29 @@ git reset --hard origin/main
 # forge is installed editable, so code is live after the reset — but a new
 # dependency in pyproject.toml would not be. Cheap when nothing changed.
 .venv/bin/python -m pip install -q -e ".[providers]"
+
+# Forge no longer owns server personas. Keep the compatibility units installed
+# for rollback, but make the accepted architecture true on every deployment so
+# an old unit cannot quietly reconnect after a reboot.
+systemctl disable --now forge@optimus forge@centurion 2>/dev/null || true
+
+# The Igor container imports Forge directly from this checkout. Python caches
+# imported modules, so a source update becomes live only after the app process
+# restarts. A missing app container is valid on a development-only Forge host.
+if docker container inspect speda-app-1 >/dev/null 2>&1; then
+    docker restart speda-app-1 >/dev/null
+    healthy=false
+    for _ in $(seq 1 60); do
+        if docker exec speda-app-1 python -c \
+            "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" \
+            >/dev/null 2>&1; then
+            healthy=true
+            break
+        fi
+        sleep 2
+    done
+    if [[ "$healthy" != true ]]; then
+        echo "Igor did not become healthy after loading the updated Forge" >&2
+        exit 1
+    fi
+fi

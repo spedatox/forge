@@ -1,4 +1,55 @@
-# Deploying the Forge (placement plan, phase H4)
+# Deploying Forge as Mark VI's Legion runtime
+
+> **Current server contract (2026-09-09):** Forge is imported by Igor and has
+> no server identity. The `forge@optimus` and `forge@centurion` units are legacy
+> rollback artifacts and must remain disabled. The sections below their
+> deprecation notice document the former peer deployment and are retained only
+> for historical troubleshooting.
+
+Igor owns model access, personas, uploads, jobs, and progress delivery. Forge
+owns the anonymous coding or security loop and creates one disposable Docker
+Cell per job. The Igor app container mounts the Forge checkout read-only, the
+workspace tree at the same absolute host path, the Docker client, and the Docker
+socket. Model-generated commands execute inside the disposable Cell; they do
+not execute in the Igor container.
+
+The required Mark VI Compose settings are:
+
+```yaml
+services:
+  app:
+    environment:
+      FORGE_DIR: /opt/forge-mk1
+      FORGE_CELL_BACKEND: docker
+      FORGE_CODER_IMAGE: forge-cell-optimus:latest
+      FORGE_REVIEWER_IMAGE: forge-cell-optimus:latest
+      FORGE_PENTESTER_IMAGE: forge-cell-centurion:latest
+    volumes:
+      - /opt/forge-mk1:/opt/forge-mk1:ro
+      - /opt/hisar/vault/Forge/workspaces:/opt/hisar/vault/Forge/workspaces
+      - /usr/bin/docker:/usr/bin/docker:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+```
+
+The identical workspace path on both sides of the container boundary matters:
+the Docker daemon runs on the host and must be able to resolve the path passed
+as the Cell bind mount. The explicit `docker` backend fails closed if the daemon
+is unavailable; production must never fall back to running worker commands in
+the Igor application container.
+
+Deploys run `/usr/local/sbin/forge-sync`, which updates the checkout, disables
+the legacy peers, restarts `speda-app-1`, and waits for Igor's health endpoint.
+Verify the cutover with:
+
+```bash
+systemctl is-active forge@optimus forge@centurion  # both inactive
+systemctl is-enabled forge@optimus forge@centurion # both disabled
+docker exec speda-app-1 python -c \
+  'from app.execution.forge import _load_runtime; print(_load_runtime())'
+docker exec speda-app-1 docker info >/dev/null
+```
+
+## Legacy peer deployment (retired)
 
 The Forge runs as a **systemd unit on the host**, not as a container. That is
 forced by the Cell design: `DockerCell` bind-mounts the job workspace into each
