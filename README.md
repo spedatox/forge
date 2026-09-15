@@ -1,8 +1,10 @@
-<p align="center">
+<p align="center">  
   <img src="forge.png" alt="Forge logo" width="200" height="200">
-</p>
-
-<h1 align="center">F.O.R.G.E.</h1>
+  <br>
+  <sub>In memory of Peter Cullen. </sub>
+</p>  
+  
+<h1 align="center">F.O.R.G.E.</h1>  
 <p align="center"><b>F</b>ramework of <b>O</b>perational <b>R</b>untime &amp; <b>G</b>ated <b>E</b>xecution.</p>
 
 A coding and security execution runtime with sandboxed tools and a permission
